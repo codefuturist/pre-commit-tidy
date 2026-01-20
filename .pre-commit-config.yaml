@@ -8,6 +8,20 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
 
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.37.0
+    hooks:
+      - id: yamllint
+        args: [-c=.yamllint.yaml]
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.21
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-gfm
+          - mdformat-black
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.13
     hooks:
@@ -19,7 +33,6 @@ repos:
     rev: v1.19.1
     hooks:
       - id: mypy
-        additional_dependencies: [types-all]
 
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.12.0

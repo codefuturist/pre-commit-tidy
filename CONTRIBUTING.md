@@ -11,20 +11,20 @@ Thank you for your interest in contributing! This document provides guidelines a
    cd pre-commit-tidy
    ```
 
-2. **Create a virtual environment**
+1. **Create a virtual environment**
 
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    ```
 
-3. **Install in development mode**
+1. **Install in development mode**
 
    ```bash
    pip install -e ".[dev]"
    ```
 
-4. **Install pre-commit hooks**
+1. **Install pre-commit hooks**
 
    ```bash
    pre-commit install
@@ -59,12 +59,12 @@ pre-commit run --all-files
 ## Submitting Changes
 
 1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make your changes
-4. Run tests: `pytest`
-5. Run linting: `pre-commit run --all-files`
-6. Commit with conventional commits: `git commit -m "feat: add new feature"`
-7. Push and create a Pull Request
+1. Create a feature branch: `git checkout -b feature/my-feature`
+1. Make your changes
+1. Run tests: `pytest`
+1. Run linting: `pre-commit run --all-files`
+1. Commit with conventional commits: `git commit -m "feat: add new feature"`
+1. Push and create a Pull Request
 
 ## Commit Message Format
 

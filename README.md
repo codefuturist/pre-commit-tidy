@@ -58,7 +58,7 @@ pip install pre-commit-tidy
    }' > .tidyrc.json
    ```
 
-2. **Run the hook**:
+1. **Run the hook**:
 
    ```bash
    # Via pre-commit
@@ -85,25 +85,25 @@ Create a `.tidyrc.json` file in your repository root:
 
 ### Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `source_dir` | string | `.` | Source directory to scan for files |
-| `target_dir` | string | `00-inbox` | Target directory to move files to |
-| `extensions` | array | `[".md"]` | File extensions to process |
-| `exclude_files` | array | `["readme.md", ...]` | Filenames to exclude (case-insensitive) |
-| `exclude_patterns` | array | `[]` | Glob patterns to exclude |
-| `duplicate_strategy` | string | `rename` | How to handle duplicates: `rename`, `skip`, or `overwrite` |
+| Option               | Type   | Default              | Description                                                |
+| -------------------- | ------ | -------------------- | ---------------------------------------------------------- |
+| `source_dir`         | string | `.`                  | Source directory to scan for files                         |
+| `target_dir`         | string | `00-inbox`           | Target directory to move files to                          |
+| `extensions`         | array  | `[".md"]`            | File extensions to process                                 |
+| `exclude_files`      | array  | `["readme.md", ...]` | Filenames to exclude (case-insensitive)                    |
+| `exclude_patterns`   | array  | `[]`                 | Glob patterns to exclude                                   |
+| `duplicate_strategy` | string | `rename`             | How to handle duplicates: `rename`, `skip`, or `overwrite` |
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `TIDY_SOURCE_DIR` | Source directory |
-| `TIDY_TARGET_DIR` | Target directory |
-| `TIDY_EXTENSIONS` | Comma-separated extensions |
+| Variable             | Description                      |
+| -------------------- | -------------------------------- |
+| `TIDY_SOURCE_DIR`    | Source directory                 |
+| `TIDY_TARGET_DIR`    | Target directory                 |
+| `TIDY_EXTENSIONS`    | Comma-separated extensions       |
 | `TIDY_EXCLUDE_FILES` | Comma-separated files to exclude |
-| `TIDY_DRY_RUN` | Set to `true` for dry run |
-| `TIDY_VERBOSE` | Set to `true` for verbose output |
+| `TIDY_DRY_RUN`       | Set to `true` for dry run        |
+| `TIDY_VERBOSE`       | Set to `true` for verbose output |
 
 ### CLI Arguments
 

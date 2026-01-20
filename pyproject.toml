@@ -38,6 +38,10 @@ dev = [
     "ruff>=0.3",
     "pre-commit>=3.6",
     "commitizen>=4.1",
+    "yamllint>=1.35",
+    "mdformat>=0.7",
+    "mdformat-gfm>=0.3",
+    "mdformat-black>=0.1",
 ]
 
 [project.scripts]

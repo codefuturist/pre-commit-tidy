@@ -6,19 +6,19 @@ This repository follows the **Git Flow** branching model.
 
 ### Permanent Branches
 
-| Branch | Purpose | Protected |
-|--------|---------|:---------:|
-| `main` | Production releases only | ✅ |
-| `develop` | Integration branch for features | ✅ |
+| Branch    | Purpose                         | Protected |
+| --------- | ------------------------------- | :-------: |
+| `main`    | Production releases only        |    ✅     |
+| `develop` | Integration branch for features |    ✅     |
 
 ### Temporary Branches
 
-| Prefix | Purpose | Base | Merge To |
-|--------|---------|------|----------|
-| `feature/*` | New features | `develop` | `develop` |
+| Prefix      | Purpose             | Base      | Merge To           |
+| ----------- | ------------------- | --------- | ------------------ |
+| `feature/*` | New features        | `develop` | `develop`          |
 | `release/*` | Release preparation | `develop` | `main` + `develop` |
-| `hotfix/*` | Production fixes | `main` | `main` + `develop` |
-| `bugfix/*` | Bug fixes | `develop` | `develop` |
+| `hotfix/*`  | Production fixes    | `main`    | `main` + `develop` |
+| `bugfix/*`  | Bug fixes           | `develop` | `develop`          |
 
 ## Workflow
 

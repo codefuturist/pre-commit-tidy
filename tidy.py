@@ -45,7 +45,6 @@ import argparse
 import fnmatch
 import json
 import os
-import re
 import shutil
 import sys
 import time
@@ -266,9 +265,7 @@ def load_env_config() -> ConfigDict:
     return config
 
 
-def should_exclude(
-    filename: str, config: TidyConfig
-) -> tuple[bool, str | None]:
+def should_exclude(filename: str, config: TidyConfig) -> tuple[bool, str | None]:
     """Check if a file should be excluded."""
     lower_filename = filename.lower()
 
@@ -296,9 +293,7 @@ def generate_unique_name(filename: str) -> str:
     return f"{path.stem}-{timestamp}{path.suffix}"
 
 
-def move_file(
-    source: Path, target_dir: Path, config: TidyConfig, logger: Logger
-) -> FileOperation:
+def move_file(source: Path, target_dir: Path, config: TidyConfig, logger: Logger) -> FileOperation:
     """Move a single file."""
     filename = source.name
     destination = target_dir / filename

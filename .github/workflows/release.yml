@@ -25,7 +25,7 @@ jobs:
           # Get version from pyproject.toml
           VERSION=$(grep -oP 'version = "\K[^"]+' pyproject.toml)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
+
           # Check if tag exists
           if git rev-parse "v$VERSION" >/dev/null 2>&1; then
             echo "Tag v$VERSION already exists"

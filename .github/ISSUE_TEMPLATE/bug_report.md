@@ -1,10 +1,6 @@
----
-name: Bug Report
-about: Report a bug to help us improve
-title: '[BUG] '
-labels: bug
-assignees: ''
----
+______________________________________________________________________
+
+## name: Bug Report about: Report a bug to help us improve title: '[BUG] ' labels: bug assignees: ''
 
 ## Bug Description
 
@@ -15,8 +11,8 @@ assignees: ''
 Steps to reproduce the behavior:
 
 1. Configure with '...'
-2. Run command '...'
-3. See error
+1. Run command '...'
+1. See error
 
 ## Expected Behavior
 

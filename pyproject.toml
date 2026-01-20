@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pre-commit-tidy"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Pre-commit hook for automated file organization - move files between directories based on configurable rules"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "codefuturist", email = "codefuturist@users.noreply.github.com"}
+    {name = "codefuturist", email = "58808821+codefuturist@users.noreply.github.com"}
 ]
 keywords = ["pre-commit", "hook", "file", "organization", "tidy", "automation"]
 classifiers = [
@@ -37,6 +37,7 @@ dev = [
     "mypy>=1.8",
     "ruff>=0.3",
     "pre-commit>=3.6",
+    "commitizen>=4.1",
 ]
 
 [project.scripts]
@@ -51,6 +52,11 @@ Issues = "https://github.com/codefuturist/pre-commit-tidy/issues"
 
 [tool.setuptools]
 py-modules = ["tidy"]
+
+[tool.setuptools_scm]
+write_to = "_version.py"
+version_scheme = "python-simplified-semver"
+local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 100
@@ -97,3 +103,10 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
 ]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version_provider = "scm"
+tag_format = "v$version"
+update_changelog_on_bump = true
+changelog_incremental = true

@@ -20,3 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive exclusion patterns (files and globs)
 
 [1.0.0]: https://github.com/codefuturist/pre-commit-tidy/releases/tag/v1.0.0
+
+## v1.1.0 (2026-01-20)
+
+### Feat
+
+- implement setuptools-scm for automatic git-based versioning
+
+## v1.0.0 (2026-01-20)
+
+### Feat
+
+- initial release of pre-commit-tidy hook

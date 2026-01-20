@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tidy import (
+from pre_commit_hooks.tidy import (
     ConfigDict,
     DuplicateStrategy,
     OperationStatus,

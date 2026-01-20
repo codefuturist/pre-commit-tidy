@@ -15,20 +15,20 @@ test:
 
 # Run tests with coverage
 coverage:
-	pytest tests/ -v --cov=tidy --cov-report=term-missing --cov-report=html
+	pytest tests/ -v --cov=pre_commit_hooks --cov-report=term-missing --cov-report=html
 
 # Run linting
 lint:
-	ruff check tidy.py tests/
+	ruff check pre_commit_hooks/ tests/
 
 # Format code
 format:
-	ruff format tidy.py tests/
-	ruff check --fix tidy.py tests/
+	ruff format pre_commit_hooks/ tests/
+	ruff check --fix pre_commit_hooks/ tests/
 
 # Run type checking
 type-check:
-	mypy tidy.py
+	mypy pre_commit_hooks/
 
 # Run all pre-commit hooks
 pre-commit:
@@ -74,7 +74,7 @@ bump-major:
 
 # Show current version
 version:
-	python -c "from tidy import __version__; print(__version__)"
+	python -c "from pre_commit_hooks import __version__; print(__version__)"
 
 # Full CI check (what CI runs)
 ci: lint type-check test

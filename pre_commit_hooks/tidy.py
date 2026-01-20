@@ -53,10 +53,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TypedDict
 
-try:
-    from _version import __version__
-except ImportError:
-    __version__ = "0.0.0+unknown"
+from pre_commit_hooks import __version__
 
 # Default configuration file names to search for
 CONFIG_FILE_NAMES = [".tidyrc.json", ".tidyrc", "tidy.config.json"]

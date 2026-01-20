@@ -49,7 +49,7 @@ dev = [
 ]
 
 [project.scripts]
-tidy = "tidy:main"
+tidy = "pre_commit_hooks.tidy:main"
 
 [project.urls]
 Homepage = "https://github.com/codefuturist/pre-commit-hooks"
@@ -59,10 +59,10 @@ Changelog = "https://github.com/codefuturist/pre-commit-hooks/blob/main/CHANGELO
 Issues = "https://github.com/codefuturist/pre-commit-hooks/issues"
 
 [tool.setuptools]
-py-modules = ["tidy"]
+packages = ["pre_commit_hooks"]
 
 [tool.setuptools_scm]
-write_to = "_version.py"
+write_to = "pre_commit_hooks/_version.py"
 version_scheme = "python-simplified-semver"
 local_scheme = "no-local-version"
 
@@ -88,7 +88,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tidy"]
+known-first-party = ["pre_commit_hooks"]
 
 [tool.mypy]
 python_version = "3.9"
@@ -110,7 +110,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["tidy"]
+source = ["pre_commit_hooks"]
 branch = true
 plugins = ["covdefaults"]
 

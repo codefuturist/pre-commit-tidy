@@ -20,13 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required for setuptools-scm
+          fetch-depth: 0 # Required for setuptools-scm
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -34,7 +34,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest tests/ -v --cov=tidy --cov-report=xml
+        run: pytest tests/ -v --cov=pre_commit_hooks --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -51,7 +51,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install dependencies
         run: |

@@ -58,3 +58,6 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# Example repos (cloned for reference)
+example/

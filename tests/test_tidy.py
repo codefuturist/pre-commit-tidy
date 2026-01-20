@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tidy import (
+    ConfigDict,
     DuplicateStrategy,
     OperationStatus,
     TidyConfig,
@@ -43,7 +44,7 @@ class TestShouldExclude:
         assert should_exclude("file.txt", config) == (False, None)
         excluded, reason = should_exclude("file.json", config)
         assert excluded is True
-        assert "extension" in reason
+        assert reason is not None and "extension" in reason
 
     def test_exclude_by_pattern(self) -> None:
         """Test excluding files by glob pattern."""
@@ -63,13 +64,13 @@ class TestGenerateUniqueName:
     def test_generates_unique_name(self) -> None:
         """Test that unique names are generated with timestamps."""
         name1 = generate_unique_name("file.md")
-        name2 = generate_unique_name("file.md")
 
         assert name1.startswith("file-")
         assert name1.endswith(".md")
         # Names should be different (different timestamps)
         # Note: This might fail if run extremely fast, but unlikely
-        assert name1 != name2 or True  # Allow same if within same millisecond
+        # We just verify the format is correct, not uniqueness
+        assert "-" in name1
 
     def test_preserves_extension(self) -> None:
         """Test that file extensions are preserved."""
@@ -162,7 +163,7 @@ class TestTidyConfig:
 
     def test_from_dict(self) -> None:
         """Test creating config from dictionary."""
-        data = {
+        data: ConfigDict = {
             "source_dir": "drafts",
             "target_dir": "published",
             "duplicate_strategy": "skip",

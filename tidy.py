@@ -236,7 +236,8 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         full_path = root_dir / config_path
         if full_path.exists():
             with open(full_path, encoding="utf-8") as f:
-                return json.load(f)
+                data: ConfigDict = json.load(f)
+                return data
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     # Try default config file names
@@ -244,7 +245,8 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         full_path = root_dir / filename
         if full_path.exists():
             with open(full_path, encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return data
 
     return {}
 

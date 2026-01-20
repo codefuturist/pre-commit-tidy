@@ -53,8 +53,6 @@ from enum import Enum
 from pathlib import Path
 from typing import TypedDict
 
-from pre_commit_hooks import __version__
-
 # Default configuration file names to search for
 CONFIG_FILE_NAMES = [".tidyrc.json", ".tidyrc", "tidy.config.json"]
 
@@ -462,11 +460,6 @@ Examples:
         "-q",
         action="store_true",
         help="Suppress all output except errors",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
     )
 
     return parser.parse_args()

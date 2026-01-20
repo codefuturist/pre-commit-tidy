@@ -1,8 +1,11 @@
 # pre-commit-tidy
 
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
+[![CI](https://github.com/codefuturist/pre-commit-tidy/actions/workflows/ci.yml/badge.svg)](https://github.com/codefuturist/pre-commit-tidy/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/pre-commit-tidy.svg)](https://badge.fury.io/py/pre-commit-tidy)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A pre-commit hook for automated file organization. Move files from source directories to target directories based on configurable rules.
 
@@ -14,8 +17,12 @@ A pre-commit hook for automated file organization. Move files from source direct
 - 📝 **Duplicate handling** - Rename, skip, or overwrite duplicate files
 - 🏃 **Dry-run mode** - Preview changes before applying them
 - 🎨 **Colorful output** - Clear, readable terminal output
+- ✅ **Zero dependencies** - Pure Python 3.9+, no external packages required
+- 🧪 **Fully tested** - Comprehensive test suite with high coverage
 
 ## Installation
+
+### As a pre-commit hook (recommended)
 
 Add to your `.pre-commit-config.yaml`:
 
@@ -33,6 +40,34 @@ Then install:
 pre-commit install
 ```
 
+### As a CLI tool
+
+```bash
+pip install pre-commit-tidy
+```
+
+## Quick Start
+
+1. **Create a config file** (optional):
+
+   ```bash
+   echo '{
+     "source_dir": ".",
+     "target_dir": "00-inbox",
+     "extensions": [".md"]
+   }' > .tidyrc.json
+   ```
+
+2. **Run the hook**:
+
+   ```bash
+   # Via pre-commit
+   pre-commit run tidy --all-files
+
+   # Or directly
+   tidy --dry-run
+   ```
+
 ## Configuration
 
 Create a `.tidyrc.json` file in your repository root:
@@ -43,7 +78,7 @@ Create a `.tidyrc.json` file in your repository root:
   "target_dir": "00-inbox",
   "extensions": [".md", ".txt"],
   "exclude_files": ["readme.md", "changelog.md", "license.md"],
-  "exclude_patterns": ["*.config.*"],
+  "exclude_patterns": ["*.config.*", "_*"],
   "duplicate_strategy": "rename"
 }
 ```
@@ -83,6 +118,7 @@ hooks:
 Or run directly:
 
 ```bash
+tidy --help
 tidy --dry-run --verbose
 tidy --source drafts --target published
 tidy --extensions .md,.txt,.rst
@@ -131,19 +167,21 @@ Organize downloaded assets:
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
 ```bash
-# Clone the repository
+# Clone and setup
 git clone https://github.com/codefuturist/pre-commit-tidy.git
 cd pre-commit-tidy
-
-# Install in development mode
-pip install -e .
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 
 # Run tests
-python -m pytest
+pytest
 
-# Run linter
-ruff check .
+# Run linting
+pre-commit run --all-files
 ```
 
 ## License

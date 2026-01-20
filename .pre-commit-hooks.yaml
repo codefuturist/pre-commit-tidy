@@ -1,0 +1,9 @@
+- id: tidy
+  name: Tidy file organization
+  description: Move files from source to target directories based on configurable rules
+  entry: tidy
+  language: python
+  always_run: true
+  pass_filenames: false
+  types: [file]
+  minimum_pre_commit_version: "2.9.0"

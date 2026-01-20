@@ -89,7 +89,7 @@ jobs:
     if: github.event_name == 'release'
     environment:
       name: pypi
-      url: https://pypi.org/p/pre-commit-tidy
+      url: https://pypi.org/p/pre-commit-hooks
     permissions:
       id-token: write
 

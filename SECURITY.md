@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability within pre-commit-tidy, please:
+If you discover a security vulnerability within pre-commit-hooks, please:
 
 1. **Do not** open a public issue
 1. Email the maintainer directly or use GitHub's private vulnerability reporting
@@ -22,7 +22,7 @@ We will respond within 48 hours and work with you to understand and address the 
 
 ## Security Best Practices
 
-When using pre-commit-tidy:
+When using pre-commit-hooks:
 
 - Review the configuration file (`.tidyrc.json`) to ensure it doesn't expose sensitive directories
 - Be cautious with `overwrite` duplicate strategy in shared environments

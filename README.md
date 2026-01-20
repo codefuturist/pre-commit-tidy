@@ -1,7 +1,7 @@
-# pre-commit-tidy
+# pre-commit-hooks
 
-[![CI](https://github.com/codefuturist/pre-commit-tidy/actions/workflows/ci.yml/badge.svg)](https://github.com/codefuturist/pre-commit-tidy/actions/workflows/ci.yml)
-[![PyPI version](https://badge.fury.io/py/pre-commit-tidy.svg)](https://badge.fury.io/py/pre-commit-tidy)
+[![CI](https://github.com/codefuturist/pre-commit-hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/codefuturist/pre-commit-hooks/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/pre-commit-hooks.svg)](https://badge.fury.io/py/pre-commit-hooks)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
@@ -43,7 +43,7 @@ pre-commit install
 ### As a CLI tool
 
 ```bash
-pip install pre-commit-tidy
+pip install pre-commit-hooks
 ```
 
 ## Quick Start

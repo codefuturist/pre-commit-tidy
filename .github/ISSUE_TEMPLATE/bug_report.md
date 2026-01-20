@@ -27,7 +27,7 @@ Steps to reproduce the behavior:
 - OS: [e.g., macOS 14.0, Ubuntu 22.04, Windows 11]
 - Python version: [e.g., 3.12.0]
 - pre-commit version: [e.g., 3.6.0]
-- pre-commit-tidy version: [e.g., 1.0.0]
+- pre-commit-hooks version: [e.g., 1.0.0]
 
 ## Configuration
 

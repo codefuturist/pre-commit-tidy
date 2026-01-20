@@ -1,1 +1,1 @@
-"""Tests for pre-commit-tidy."""
+"""Tests for pre-commit-hooks."""

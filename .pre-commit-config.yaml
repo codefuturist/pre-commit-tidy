@@ -32,8 +32,14 @@ repos:
     rev: v0.14.13
     hooks:
       - id: ruff
-        args: [--fix]
+        args: [--fix, --select, I]
       - id: ruff-format
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+      - id: pyupgrade
+        args: [--py39-plus]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.19.1

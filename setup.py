@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Setup script for pre-commit-tidy."""
+from __future__ import annotations
 
 from setuptools import setup
 

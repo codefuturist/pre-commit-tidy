@@ -11,8 +11,8 @@
 If you discover a security vulnerability within pre-commit-tidy, please:
 
 1. **Do not** open a public issue
-2. Email the maintainer directly or use GitHub's private vulnerability reporting
-3. Include:
+1. Email the maintainer directly or use GitHub's private vulnerability reporting
+1. Include:
    - A description of the vulnerability
    - Steps to reproduce
    - Potential impact

@@ -1,0 +1,25 @@
+{
+  "remotes": {
+    "origin": {
+      "priority": 1,
+      "branches": ["*"],
+      "force_push": "block",
+      "retry": 3,
+      "timeout": 30
+    },
+    "github": {
+      "priority": 2,
+      "branches": ["*"],
+      "force_push": "warn",
+      "retry": 3,
+      "timeout": 30
+    }
+  },
+  "parallel": true,
+  "max_workers": 4,
+  "offline_queue": true,
+  "health_check_timeout": 5,
+  "retry_base_delay": 1.0,
+  "retry_max_delay": 30.0,
+  "auto_fetch": true
+}

@@ -148,6 +148,8 @@ class FilesystemTargetDict(TypedDict, total=False):
     path: str
     exclude: list[str]
     delete: bool  # Delete extraneous files in destination
+    branch_mode: str  # "keep", "match", or "specific"
+    branch: str  # Branch name for "specific" mode
 
 
 class RsyncTargetDict(TypedDict, total=False):
@@ -161,6 +163,8 @@ class RsyncTargetDict(TypedDict, total=False):
     exclude: list[str]
     delete: bool
     options: list[str]  # Additional rsync options
+    branch_mode: str  # "keep", "match", or "specific"
+    branch: str  # Branch name for "specific" mode
 
 
 class RemoteConfigDict(TypedDict, total=False):
@@ -198,6 +202,14 @@ class SyncTargetType(Enum):
     RSYNC = "rsync"
 
 
+class BranchMode(Enum):
+    """Branch switching mode for sync targets."""
+
+    KEEP = "keep"  # Keep destination on its current branch (default)
+    MATCH = "match"  # Switch destination to same branch as source
+    SPECIFIC = "specific"  # Always use a specific branch
+
+
 @dataclass
 class FilesystemTarget:
     """Configuration for a local filesystem sync target."""
@@ -206,16 +218,26 @@ class FilesystemTarget:
     path: str
     exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
     delete: bool = False  # Delete extraneous files in destination
+    branch_mode: BranchMode = BranchMode.KEEP  # Branch switching behavior
+    branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.FILESYSTEM
 
     @classmethod
     def from_dict(cls, name: str, data: FilesystemTargetDict) -> FilesystemTarget:
         """Create from dictionary."""
+        branch_mode_str = data.get("branch_mode", "keep")
+        try:
+            branch_mode = BranchMode(branch_mode_str)
+        except ValueError:
+            branch_mode = BranchMode.KEEP
+
         return cls(
             name=name,
             path=data.get("path", ""),
             exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
             delete=data.get("delete", False),
+            branch_mode=branch_mode,
+            branch=data.get("branch", ""),
         )
 
 
@@ -232,11 +254,19 @@ class RsyncTarget:
     exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
     delete: bool = False
     options: list[str] = field(default_factory=list)  # Additional rsync options
+    branch_mode: BranchMode = BranchMode.KEEP  # Branch switching behavior
+    branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.RSYNC
 
     @classmethod
     def from_dict(cls, name: str, data: RsyncTargetDict) -> RsyncTarget:
         """Create from dictionary."""
+        branch_mode_str = data.get("branch_mode", "keep")
+        try:
+            branch_mode = BranchMode(branch_mode_str)
+        except ValueError:
+            branch_mode = BranchMode.KEEP
+
         return cls(
             name=name,
             host=data.get("host", ""),
@@ -247,6 +277,8 @@ class RsyncTarget:
             exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
             delete=data.get("delete", False),
             options=data.get("options", []),
+            branch_mode=branch_mode,
+            branch=data.get("branch", ""),
         )
 
     def get_rsync_destination(self) -> str:
@@ -254,6 +286,12 @@ class RsyncTarget:
         if self.user:
             return f"{self.user}@{self.host}:{self.path}"
         return f"{self.host}:{self.path}"
+
+    def get_ssh_host(self) -> str:
+        """Get the SSH host string."""
+        if self.user:
+            return f"{self.user}@{self.host}"
+        return self.host
 
 
 @dataclass
@@ -1142,6 +1180,169 @@ def get_repo_root() -> Path | None:
     return None
 
 
+def get_current_branch(repo_path: Path | None = None) -> str | None:
+    """Get the current branch name of a git repository."""
+    if repo_path is None:
+        result = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+    else:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    if result.returncode == 0:
+        branch = result.stdout.strip()
+        return branch if branch != "HEAD" else None  # Detached HEAD
+    return None
+
+
+def is_git_repo(path: Path) -> bool:
+    """Check if a path is a git repository."""
+    git_dir = path / ".git"
+    return git_dir.exists() and (git_dir.is_dir() or git_dir.is_file())
+
+
+def switch_branch_at_path(
+    repo_path: Path,
+    branch: str,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Switch to a branch at a local git repository path.
+    
+    Returns (success, message).
+    """
+    if not is_git_repo(repo_path):
+        return False, f"Not a git repository: {repo_path}"
+
+    if dry_run:
+        return True, f"[DRY RUN] Would switch to branch '{branch}' at {repo_path}"
+
+    # First, try to checkout the branch
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "checkout", branch],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    if result.returncode == 0:
+        return True, f"Switched to branch '{branch}'"
+
+    # If checkout failed, maybe branch doesn't exist locally - try to fetch and checkout
+    # First check if this is a tracking branch issue
+    if "did not match any file" in result.stderr or "pathspec" in result.stderr:
+        # Try to create tracking branch from origin
+        fetch_result = subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        # Try checkout again after fetch
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "checkout", branch],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            return True, f"Fetched and switched to branch '{branch}'"
+
+        # Try creating a new tracking branch
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "checkout", "-b", branch, f"origin/{branch}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            return True, f"Created tracking branch '{branch}'"
+
+    return False, f"Failed to switch to branch '{branch}': {result.stderr.strip()}"
+
+
+def switch_branch_via_ssh(
+    target: RsyncTarget,
+    branch: str,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Switch to a branch at a remote git repository via SSH.
+    
+    Returns (success, message).
+    """
+    if dry_run:
+        return True, f"[DRY RUN] Would switch to branch '{branch}' at {target.get_rsync_destination()}"
+
+    # Build SSH command
+    ssh_cmd = ["ssh"]
+    if target.port != 22:
+        ssh_cmd.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd.extend(["-i", str(key_path)])
+
+    ssh_cmd.append(target.get_ssh_host())
+
+    # Command to run on remote - check if git repo and switch branch
+    remote_cmd = f"""
+        cd "{target.path}" && \
+        if [ -d .git ] || [ -f .git ]; then \
+            git checkout "{branch}" 2>/dev/null || \
+            (git fetch --all && git checkout "{branch}") 2>/dev/null || \
+            git checkout -b "{branch}" "origin/{branch}" 2>/dev/null; \
+            echo "BRANCH_SWITCHED"; \
+        else \
+            echo "NOT_A_GIT_REPO"; \
+        fi
+    """
+    ssh_cmd.append(remote_cmd)
+
+    try:
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        if "BRANCH_SWITCHED" in result.stdout:
+            return True, f"Switched remote to branch '{branch}'"
+        elif "NOT_A_GIT_REPO" in result.stdout:
+            return False, f"Remote path is not a git repository: {target.path}"
+        else:
+            return False, f"Failed to switch branch: {result.stderr.strip()}"
+
+    except subprocess.TimeoutExpired:
+        return False, "SSH command timed out"
+    except Exception as e:
+        return False, f"SSH error: {e}"
+
+
+def get_target_branch(
+    target: FilesystemTarget | RsyncTarget,
+    source_branch: str | None = None,
+) -> str | None:
+    """Determine the target branch based on branch_mode configuration."""
+    if target.branch_mode == BranchMode.KEEP:
+        return None  # Don't change branch
+    elif target.branch_mode == BranchMode.MATCH:
+        return source_branch  # Use same branch as source
+    elif target.branch_mode == BranchMode.SPECIFIC:
+        return target.branch if target.branch else None
+    return None
+
+
 def sync_to_filesystem(
     target: FilesystemTarget,
     source_dir: Path | None = None,
@@ -1149,6 +1350,7 @@ def sync_to_filesystem(
 ) -> SyncTargetResult:
     """Sync repository to a local filesystem location using rsync."""
     start_time = time.time()
+    branch_message = ""
 
     # Get source directory (repo root)
     if source_dir is None:
@@ -1172,12 +1374,27 @@ def sync_to_filesystem(
             message=f"Parent directory does not exist: {dest_path.parent}",
         )
 
+    # Handle branch switching if destination is a git repo
+    target_branch = get_target_branch(target, get_current_branch())
+    if target_branch and dest_path.exists() and is_git_repo(dest_path):
+        current_dest_branch = get_current_branch(dest_path)
+        if current_dest_branch != target_branch:
+            success, branch_message = switch_branch_at_path(dest_path, target_branch, dry_run)
+            if not success and target.branch_mode != BranchMode.KEEP:
+                logger.warning(f"Branch switch failed: {branch_message}")
+            elif success:
+                logger.info(f"📌 {branch_message}")
+                branch_message = f" (branch: {target_branch})"
+
     if dry_run:
+        dry_run_msg = f"[DRY RUN] Would sync to {dest_path}"
+        if target_branch:
+            dry_run_msg += f" on branch '{target_branch}'"
         return SyncTargetResult(
             name=target.name,
             target_type=SyncTargetType.FILESYSTEM,
             success=True,
-            message=f"[DRY RUN] Would sync to {dest_path}",
+            message=dry_run_msg,
         )
 
     # Build rsync command for local sync
@@ -1224,7 +1441,7 @@ def sync_to_filesystem(
                 name=target.name,
                 target_type=SyncTargetType.FILESYSTEM,
                 success=True,
-                message=f"Successfully synced to {dest_path}",
+                message=f"Successfully synced to {dest_path}{branch_message}",
                 files_transferred=files_transferred,
                 duration=round(duration, 2),
             )
@@ -1270,6 +1487,7 @@ def sync_to_rsync(
 ) -> SyncTargetResult:
     """Sync repository to a remote host using rsync over SSH."""
     start_time = time.time()
+    branch_message = ""
 
     # Get source directory (repo root)
     if source_dir is None:
@@ -1298,13 +1516,26 @@ def sync_to_rsync(
             message="No path specified for rsync target",
         )
 
+    # Handle branch switching via SSH if configured
+    target_branch = get_target_branch(target, get_current_branch())
+    if target_branch:
+        success, branch_msg = switch_branch_via_ssh(target, target_branch, dry_run)
+        if success:
+            logger.info(f"📌 {branch_msg}")
+            branch_message = f" (branch: {target_branch})"
+        elif target.branch_mode != BranchMode.KEEP:
+            logger.warning(f"Branch switch failed: {branch_msg}")
+
     if dry_run:
         dest = target.get_rsync_destination()
+        dry_run_msg = f"[DRY RUN] Would rsync to {dest}"
+        if target_branch:
+            dry_run_msg += f" on branch '{target_branch}'"
         return SyncTargetResult(
             name=target.name,
             target_type=SyncTargetType.RSYNC,
             success=True,
-            message=f"[DRY RUN] Would rsync to {dest}",
+            message=dry_run_msg,
         )
 
     # Build rsync command
@@ -1374,7 +1605,7 @@ def sync_to_rsync(
                 name=target.name,
                 target_type=SyncTargetType.RSYNC,
                 success=True,
-                message=f"Successfully synced to {dest}",
+                message=f"Successfully synced to {dest}{branch_message}",
                 files_transferred=files_transferred,
                 bytes_transferred=bytes_transferred,
                 duration=round(duration, 2),

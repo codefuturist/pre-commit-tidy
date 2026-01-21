@@ -230,6 +230,7 @@ Create a `.remotesyncrc.json` file in your project root:
 | **VPN Support** | Auto-connect VPN for remotes behind firewalls |
 | **Filesystem Sync** | Sync to local paths (external drives, NAS) via rsync |
 | **Rsync Targets** | Sync to remote servers via SSH + rsync |
+| **Branch Switching** | Auto-switch destination branches (match source or specific) |
 
 ### Remote Configuration Options
 
@@ -380,6 +381,8 @@ Add `sync_targets` to your `.remotesyncrc.json`:
 | `path` | string | required | Local destination path |
 | `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
 | `delete` | bool | `false` | Delete files not in source |
+| `branch_mode` | string | `"keep"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch` | string | `""` | Target branch (for `"specific"` mode) |
 
 #### Rsync Target Options
 
@@ -393,6 +396,44 @@ Add `sync_targets` to your `.remotesyncrc.json`:
 | `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
 | `delete` | bool | `false` | Delete files not in source |
 | `options` | list | `[]` | Additional rsync options |
+| `branch_mode` | string | `"keep"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch` | string | `""` | Target branch (for `"specific"` mode) |
+
+#### Branch Switching Modes
+
+When syncing to destinations that are git repositories, you can control branch switching:
+
+| Mode | Description |
+|------|-------------|
+| `keep` | Keep destination on its current branch (default) |
+| `match` | Switch destination to same branch as source |
+| `specific` | Always use a specific branch |
+
+**Example: Match source branch**
+```json
+{
+    "sync_targets": {
+        "backup": {
+            "path": "/backup/my-repo",
+            "branch_mode": "match"
+        }
+    }
+}
+```
+
+**Example: Always use main branch**
+```json
+{
+    "sync_targets": {
+        "production": {
+            "host": "deploy.example.com",
+            "path": "/var/www/app",
+            "branch_mode": "specific",
+            "branch": "main"
+        }
+    }
+}
+```
 
 #### Usage
 

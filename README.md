@@ -3,6 +3,4 @@
 
 ## pre-commit
 
-A framework for managing and maintaining multi-language pre-commit hooks.
-
-For more information see: https://pre-commit.com/
+A framework library for managing and maintaining multi-language pre-commit hooks.

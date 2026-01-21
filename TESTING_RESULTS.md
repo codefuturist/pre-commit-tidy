@@ -4,7 +4,7 @@
 - **Date**: 2026-01-21
 - **Repository**: pre-commit-tidy
 - **Branch**: develop
-- **Remotes**: 
+- **Remotes**:
   - `origin`: https://github.com/codefuturist/pre-commit-tidy.git
   - `github`: git@github.com:codefuturist/pre-commit.git
 

@@ -248,6 +248,6 @@ Complete documentation available in:
 
 The multi-remote sync feature is **production-ready** and provides significant value to developers managing multiple git remotes. The VPN support makes it especially useful for teams with private infrastructure.
 
-**Installation**: `pip install -e .`  
-**Usage**: `remote-sync --help`  
+**Installation**: `pip install -e .`
+**Usage**: `remote-sync --help`
 **Repository**: https://github.com/codefuturist/pre-commit

@@ -118,7 +118,6 @@ Environment Variables:
     BINARY_TRACK_CODESIGN      Set to 'true' to enable codesigning
     BINARY_TRACK_CODESIGN_ID   Codesigning identity (default: "-" for ad-hoc)
 """
-
 from __future__ import annotations
 
 import argparse
@@ -132,47 +131,51 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from dataclasses import field
+from datetime import datetime
+from datetime import timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
+from typing import TypedDict
 
 # Version
-__version__ = "1.0.0"
+__version__ = '1.0.0'
 
 # Default configuration file names
-CONFIG_FILE_NAMES = [".binariesrc.json", ".binariesrc", "binaries.config.json"]
+CONFIG_FILE_NAMES = ['.binariesrc.json', '.binariesrc', 'binaries.config.json']
 
 # Manifest file for tracking build state
-BUILD_MANIFEST_FILE = ".binary-track-manifest.json"
+BUILD_MANIFEST_FILE = '.binary-track-manifest.json'
 
 # Pre-commit config file
-PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
+PRE_COMMIT_CONFIG = '.pre-commit-config.yaml'
 
 
 class Platform(Enum):
     """Supported operating system platforms."""
 
-    MACOS = "macos"
-    LINUX = "linux"
-    WINDOWS = "windows"
-    UNKNOWN = "unknown"
+    MACOS = 'macos'
+    LINUX = 'linux'
+    WINDOWS = 'windows'
+    UNKNOWN = 'unknown'
 
 
 class BinaryType(Enum):
     """Type of binary application."""
 
-    CLI = "cli"  # Command-line tool
-    GUI = "gui"  # Graphical application
+    CLI = 'cli'  # Command-line tool
+    GUI = 'gui'  # Graphical application
 
 
 class InstallScope(Enum):
     """Installation scope for binaries."""
 
-    USER = "user"      # User-local installation
-    SYSTEM = "system"  # System-wide installation
+    USER = 'user'      # User-local installation
+    SYSTEM = 'system'  # System-wide installation
 
 
 @dataclass
@@ -183,7 +186,7 @@ class InstallLocation:
     scope: InstallScope
     binary_type: BinaryType
     platform: Platform
-    description: str = ""
+    description: str = ''
     requires_admin: bool = False
 
     def exists(self) -> bool:
@@ -204,11 +207,11 @@ class InstallLocation:
 def get_current_platform() -> Platform:
     """Detect the current operating system platform."""
     system = platform.system().lower()
-    if system == "darwin":
+    if system == 'darwin':
         return Platform.MACOS
-    elif system == "linux":
+    elif system == 'linux':
         return Platform.LINUX
-    elif system == "windows":
+    elif system == 'windows':
         return Platform.WINDOWS
     return Platform.UNKNOWN
 
@@ -237,45 +240,45 @@ def get_default_install_locations(
         locations = [
             # User CLI tools
             InstallLocation(
-                path=Path.home() / ".local" / "bin",
+                path=Path.home() / '.local' / 'bin',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.MACOS,
-                description="User-local CLI tools (recommended)",
+                description='User-local CLI tools (recommended)',
             ),
             # User GUI apps
             InstallLocation(
-                path=Path.home() / "Applications",
+                path=Path.home() / 'Applications',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.GUI,
                 platform=Platform.MACOS,
-                description="User-local GUI applications",
+                description='User-local GUI applications',
             ),
             # System CLI tools
             InstallLocation(
-                path=Path("/usr/local/bin"),
+                path=Path('/usr/local/bin'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.CLI,
                 platform=Platform.MACOS,
-                description="System-wide CLI tools (Homebrew default)",
+                description='System-wide CLI tools (Homebrew default)',
                 requires_admin=True,
             ),
             # System GUI apps
             InstallLocation(
-                path=Path("/Applications"),
+                path=Path('/Applications'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.GUI,
                 platform=Platform.MACOS,
-                description="System-wide GUI applications",
+                description='System-wide GUI applications',
                 requires_admin=True,
             ),
             # Alternative user CLI location
             InstallLocation(
-                path=Path.home() / "bin",
+                path=Path.home() / 'bin',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.MACOS,
-                description="User bin directory (legacy)",
+                description='User bin directory (legacy)',
             ),
         ]
 
@@ -283,105 +286,105 @@ def get_default_install_locations(
         locations = [
             # User CLI tools (XDG standard)
             InstallLocation(
-                path=Path.home() / ".local" / "bin",
+                path=Path.home() / '.local' / 'bin',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.LINUX,
-                description="User-local CLI tools (XDG standard)",
+                description='User-local CLI tools (XDG standard)',
             ),
             # User GUI apps (application launchers)
             InstallLocation(
-                path=Path.home() / ".local" / "share" / "applications",
+                path=Path.home() / '.local' / 'share' / 'applications',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.GUI,
                 platform=Platform.LINUX,
-                description="User-local application launchers (.desktop files)",
+                description='User-local application launchers (.desktop files)',
             ),
             # User GUI app binaries
             InstallLocation(
-                path=Path.home() / ".local" / "opt",
+                path=Path.home() / '.local' / 'opt',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.GUI,
                 platform=Platform.LINUX,
-                description="User-local GUI application binaries",
+                description='User-local GUI application binaries',
             ),
             # System CLI tools (local)
             InstallLocation(
-                path=Path("/usr/local/bin"),
+                path=Path('/usr/local/bin'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.CLI,
                 platform=Platform.LINUX,
-                description="System-wide CLI tools (local)",
+                description='System-wide CLI tools (local)',
                 requires_admin=True,
             ),
             # System CLI tools (distro)
             InstallLocation(
-                path=Path("/usr/bin"),
+                path=Path('/usr/bin'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.CLI,
                 platform=Platform.LINUX,
-                description="System-wide CLI tools (distro-managed)",
+                description='System-wide CLI tools (distro-managed)',
                 requires_admin=True,
             ),
             # System GUI apps
             InstallLocation(
-                path=Path("/opt"),
+                path=Path('/opt'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.GUI,
                 platform=Platform.LINUX,
-                description="System-wide optional applications",
+                description='System-wide optional applications',
                 requires_admin=True,
             ),
             # System GUI app launchers
             InstallLocation(
-                path=Path("/usr/share/applications"),
+                path=Path('/usr/share/applications'),
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.GUI,
                 platform=Platform.LINUX,
-                description="System-wide application launchers",
+                description='System-wide application launchers',
                 requires_admin=True,
             ),
             # Alternative user CLI location
             InstallLocation(
-                path=Path.home() / "bin",
+                path=Path.home() / 'bin',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.LINUX,
-                description="User bin directory (legacy)",
+                description='User bin directory (legacy)',
             ),
         ]
 
     elif target_platform == Platform.WINDOWS:
         # Get Windows environment paths
-        localappdata = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-        programfiles = os.environ.get("ProgramFiles", "C:\\Program Files")
-        programfiles_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        localappdata = os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local'))
+        appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
+        programfiles = os.environ.get('ProgramFiles', 'C:\\Program Files')
+        programfiles_x86 = os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)')
 
         locations = [
             # User CLI tools
             InstallLocation(
-                path=Path(localappdata) / "Programs",
+                path=Path(localappdata) / 'Programs',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.WINDOWS,
-                description="User-local programs",
+                description='User-local programs',
             ),
             # User CLI tools (alternative)
             InstallLocation(
-                path=Path(localappdata) / "Microsoft" / "WindowsApps",
+                path=Path(localappdata) / 'Microsoft' / 'WindowsApps',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.WINDOWS,
-                description="Windows Apps (user)",
+                description='Windows Apps (user)',
             ),
             # User GUI apps
             InstallLocation(
-                path=Path(localappdata) / "Programs",
+                path=Path(localappdata) / 'Programs',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.GUI,
                 platform=Platform.WINDOWS,
-                description="User-local GUI applications",
+                description='User-local GUI applications',
             ),
             # User apps (Roaming)
             InstallLocation(
@@ -389,7 +392,7 @@ def get_default_install_locations(
                 scope=InstallScope.USER,
                 binary_type=BinaryType.GUI,
                 platform=Platform.WINDOWS,
-                description="User roaming applications",
+                description='User roaming applications',
             ),
             # System CLI/GUI apps (64-bit)
             InstallLocation(
@@ -397,7 +400,7 @@ def get_default_install_locations(
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.CLI,
                 platform=Platform.WINDOWS,
-                description="System-wide programs (64-bit)",
+                description='System-wide programs (64-bit)',
                 requires_admin=True,
             ),
             InstallLocation(
@@ -405,7 +408,7 @@ def get_default_install_locations(
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.GUI,
                 platform=Platform.WINDOWS,
-                description="System-wide programs (64-bit)",
+                description='System-wide programs (64-bit)',
                 requires_admin=True,
             ),
             # System apps (32-bit)
@@ -414,16 +417,16 @@ def get_default_install_locations(
                 scope=InstallScope.SYSTEM,
                 binary_type=BinaryType.GUI,
                 platform=Platform.WINDOWS,
-                description="System-wide programs (32-bit)",
+                description='System-wide programs (32-bit)',
                 requires_admin=True,
             ),
             # User bin directory (custom convention)
             InstallLocation(
-                path=Path.home() / ".local" / "bin",
+                path=Path.home() / '.local' / 'bin',
                 scope=InstallScope.USER,
                 binary_type=BinaryType.CLI,
                 platform=Platform.WINDOWS,
-                description="User-local CLI tools (Unix-style)",
+                description='User-local CLI tools (Unix-style)',
             ),
         ]
 
@@ -455,7 +458,7 @@ def get_recommended_install_path(
     if locations:
         return locations[0].path
     # Fallback to ~/.local/bin
-    return Path.home() / ".local" / "bin"
+    return Path.home() / '.local' / 'bin'
 
 
 def ensure_install_path_exists(path: Path) -> bool:
@@ -484,7 +487,7 @@ def is_path_in_system_path(path: Path) -> bool:
         True if path is in system PATH
     """
     path_str = str(path.resolve())
-    system_path = os.environ.get("PATH", "")
+    system_path = os.environ.get('PATH', '')
 
     if get_current_platform() == Platform.WINDOWS:
         # Case-insensitive comparison on Windows
@@ -553,7 +556,7 @@ def find_shadow_conflicts(
         if binary_type == BinaryType.GUI:
             # For GUI apps, check for .app bundles on macOS or similar
             if current_platform == Platform.MACOS:
-                if not binary_name.endswith(".app"):
+                if not binary_name.endswith('.app'):
                     candidate = location.path / f"{binary_name}.app"
                 else:
                     candidate = location.path / binary_name
@@ -563,7 +566,7 @@ def find_shadow_conflicts(
             # For CLI tools
             candidate = location.path / binary_name
             # On Windows, also check for .exe
-            if current_platform == Platform.WINDOWS and not binary_name.endswith(".exe"):
+            if current_platform == Platform.WINDOWS and not binary_name.endswith('.exe'):
                 candidate_exe = location.path / f"{binary_name}.exe"
                 if candidate_exe.exists() and candidate_exe.resolve() != install_path_resolved:
                     conflicts.append((
@@ -602,7 +605,7 @@ def get_path_priority(path: Path) -> int:
     Returns:
         Index in PATH, or -1 if not found
     """
-    system_path = os.environ.get("PATH", "")
+    system_path = os.environ.get('PATH', '')
     path_str = str(path.resolve())
 
     if get_current_platform() == Platform.WINDOWS:
@@ -637,7 +640,7 @@ def check_shadow_priority(
     conflict_priority = get_path_priority(conflict_dir)
 
     if install_priority == -1 and conflict_priority == -1:
-        return "neither in PATH"
+        return 'neither in PATH'
     elif install_priority == -1:
         return f"shadowed by {conflict_path} (yours not in PATH)"
     elif conflict_priority == -1:
@@ -647,56 +650,56 @@ def check_shadow_priority(
     elif install_priority > conflict_priority:
         return f"shadowed by {conflict_path}"
     else:
-        return "same directory priority"
+        return 'same directory priority'
 
 
 class TrackingMethod(Enum):
     """How to track source changes."""
 
-    GIT_COMMIT = "git_commit"
-    MTIME = "mtime"
-    HASH = "hash"
+    GIT_COMMIT = 'git_commit'
+    MTIME = 'mtime'
+    HASH = 'hash'
 
 
 class PreCommitPolicy(Enum):
     """What to do when stale binaries detected during pre-commit."""
 
-    WARN = "warn"
-    BLOCK = "block"
-    IGNORE = "ignore"
+    WARN = 'warn'
+    BLOCK = 'block'
+    IGNORE = 'ignore'
 
 
 class BinaryStatus(Enum):
     """Status of a tracked binary."""
 
-    CURRENT = "current"
-    STALE = "stale"
-    MISSING = "missing"
-    NOT_EXECUTABLE = "not_executable"
-    NOT_IN_PATH = "not_in_path"
-    BUILD_FAILED = "build_failed"
-    UNKNOWN = "unknown"
+    CURRENT = 'current'
+    STALE = 'stale'
+    MISSING = 'missing'
+    NOT_EXECUTABLE = 'not_executable'
+    NOT_IN_PATH = 'not_in_path'
+    BUILD_FAILED = 'build_failed'
+    UNKNOWN = 'unknown'
 
 
 class RebuildStatus(Enum):
     """Status of a rebuild operation."""
 
-    SUCCESS = "success"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    DRY_RUN = "dry_run"
+    SUCCESS = 'success'
+    FAILED = 'failed'
+    SKIPPED = 'skipped'
+    DRY_RUN = 'dry_run'
 
 
 class CodesignStatus(Enum):
     """Status of a codesigning operation."""
 
-    SIGNED = "signed"
-    VALID = "valid"
-    INVALID = "invalid"
-    UNSIGNED = "unsigned"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    NOT_SUPPORTED = "not_supported"
+    SIGNED = 'signed'
+    VALID = 'valid'
+    INVALID = 'invalid'
+    UNSIGNED = 'unsigned'
+    FAILED = 'failed'
+    SKIPPED = 'skipped'
+    NOT_SUPPORTED = 'not_supported'
 
 
 class CodesignConfigDict(TypedDict, total=False):
@@ -746,7 +749,7 @@ class CodesignConfig:
     """Configuration for codesigning binaries."""
 
     enabled: bool = False
-    identity: str = "-"  # "-" for ad-hoc signing
+    identity: str = '-'  # "-" for ad-hoc signing
     entitlements: str | None = None
     options: list[str] = field(default_factory=list)
     force: bool = True  # Replace existing signatures
@@ -757,18 +760,18 @@ class CodesignConfig:
         if not data:
             return cls()
         return cls(
-            enabled=data.get("enabled", False),
-            identity=data.get("identity", "-"),
-            entitlements=data.get("entitlements"),
-            options=data.get("options", []),
-            force=data.get("force", True),
+            enabled=data.get('enabled', False),
+            identity=data.get('identity', '-'),
+            entitlements=data.get('entitlements'),
+            options=data.get('options', []),
+            force=data.get('force', True),
         )
 
     def merge_with(self, other: CodesignConfig) -> CodesignConfig:
         """Merge with another config (self takes precedence for explicit values)."""
         return CodesignConfig(
             enabled=self.enabled if self.enabled else other.enabled,
-            identity=self.identity if self.identity != "-" else other.identity,
+            identity=self.identity if self.identity != '-' else other.identity,
             entitlements=self.entitlements or other.entitlements,
             options=self.options if self.options else other.options,
             force=self.force,
@@ -781,14 +784,14 @@ class BinaryConfig:
 
     name: str
     source_patterns: list[str] = field(default_factory=list)
-    build_cmd: str = ""
-    install_path: str = ""
+    build_cmd: str = ''
+    install_path: str = ''
     binary_type: BinaryType = BinaryType.CLI
     install_scope: InstallScope = InstallScope.USER
-    language: str = ""
+    language: str = ''
     rebuild_on_commit: bool = True
     check_in_path: bool = True
-    working_dir: str = "."
+    working_dir: str = '.'
     env: dict[str, str] = field(default_factory=dict)
     timeout: int = 300  # 5 minutes default
     codesign: CodesignConfig = field(default_factory=CodesignConfig)
@@ -797,39 +800,39 @@ class BinaryConfig:
     def from_dict(cls, name: str, data: BinaryConfigDict) -> BinaryConfig:
         """Create from dictionary."""
         # Parse binary type
-        binary_type_str = data.get("binary_type", "cli")
+        binary_type_str = data.get('binary_type', 'cli')
         try:
             binary_type = BinaryType(binary_type_str)
         except ValueError:
             binary_type = BinaryType.CLI
 
         # Parse install scope
-        install_scope_str = data.get("install_scope", "user")
+        install_scope_str = data.get('install_scope', 'user')
         try:
             install_scope = InstallScope(install_scope_str)
         except ValueError:
             install_scope = InstallScope.USER
 
         # Determine install path (use default if not specified)
-        install_path = data.get("install_path", "")
+        install_path = data.get('install_path', '')
         if not install_path:
             default_dir = get_recommended_install_path(binary_type, install_scope)
             install_path = str(default_dir / name)
 
         return cls(
             name=name,
-            source_patterns=data.get("source_patterns", []),
-            build_cmd=data.get("build_cmd", ""),
+            source_patterns=data.get('source_patterns', []),
+            build_cmd=data.get('build_cmd', ''),
             install_path=install_path,
             binary_type=binary_type,
             install_scope=install_scope,
-            language=data.get("language", ""),
-            rebuild_on_commit=data.get("rebuild_on_commit", True),
-            check_in_path=data.get("check_in_path", True),
-            working_dir=data.get("working_dir", "."),
-            env=data.get("env", {}),
-            timeout=data.get("timeout", 300),
-            codesign=CodesignConfig.from_dict(data.get("codesign")),
+            language=data.get('language', ''),
+            rebuild_on_commit=data.get('rebuild_on_commit', True),
+            check_in_path=data.get('check_in_path', True),
+            working_dir=data.get('working_dir', '.'),
+            env=data.get('env', {}),
+            timeout=data.get('timeout', 300),
+            codesign=CodesignConfig.from_dict(data.get('codesign')),
         )
 
     def get_expanded_install_path(self) -> Path:
@@ -851,7 +854,7 @@ class TrackConfig:
 
     root_dir: Path = field(default_factory=Path.cwd)
     binaries: dict[str, BinaryConfig] = field(default_factory=dict)
-    system_binaries: dict[str, str] = field(default_factory=lambda: {"git": "git", "codesign": "codesign"})
+    system_binaries: dict[str, str] = field(default_factory=lambda: {'git': 'git', 'codesign': 'codesign'})
     auto_rebuild: bool = False
     stale_threshold_hours: int = 24
     watch_debounce_ms: int = 500
@@ -869,22 +872,22 @@ class TrackConfig:
     def from_dict(cls, data: ConfigDict, root_dir: Path | None = None) -> TrackConfig:
         """Create from dictionary."""
         # Parse global codesign config first
-        global_codesign = CodesignConfig.from_dict(data.get("codesign"))
+        global_codesign = CodesignConfig.from_dict(data.get('codesign'))
 
         binaries = {}
-        for name, binary_data in data.get("binaries", {}).items():
+        for name, binary_data in data.get('binaries', {}).items():
             binary = BinaryConfig.from_dict(name, binary_data)
             # Merge per-binary codesign with global config
             binary.codesign = binary.codesign.merge_with(global_codesign)
             binaries[name] = binary
 
-        policy_str = data.get("pre_commit_policy", "warn")
+        policy_str = data.get('pre_commit_policy', 'warn')
         try:
             policy = PreCommitPolicy(policy_str)
         except ValueError:
             policy = PreCommitPolicy.WARN
 
-        track_by_str = data.get("track_by", "git_commit")
+        track_by_str = data.get('track_by', 'git_commit')
         try:
             track_by = TrackingMethod(track_by_str)
         except ValueError:
@@ -892,22 +895,22 @@ class TrackConfig:
 
         # Parse system binaries with defaults
         system_binaries = {
-            "git": "git",
-            "codesign": "codesign",
+            'git': 'git',
+            'codesign': 'codesign',
         }
-        if "system_binaries" in data:
-            system_binaries.update(data["system_binaries"])
+        if 'system_binaries' in data:
+            system_binaries.update(data['system_binaries'])
 
         config = cls(
             binaries=binaries,
             system_binaries=system_binaries,
-            auto_rebuild=data.get("auto_rebuild", False),
-            stale_threshold_hours=data.get("stale_threshold_hours", 24),
-            watch_debounce_ms=data.get("watch_debounce_ms", 500),
+            auto_rebuild=data.get('auto_rebuild', False),
+            stale_threshold_hours=data.get('stale_threshold_hours', 24),
+            watch_debounce_ms=data.get('watch_debounce_ms', 500),
             pre_commit_policy=policy,
             track_by=track_by,
-            parallel_builds=data.get("parallel_builds", True),
-            max_workers=data.get("max_workers", 4),
+            parallel_builds=data.get('parallel_builds', True),
+            max_workers=data.get('max_workers', 4),
             codesign=global_codesign,
         )
 
@@ -923,38 +926,38 @@ class BuildRecord:
 
     binary_name: str
     built_at: str
-    source_commit: str = ""
+    source_commit: str = ''
     source_hashes: dict[str, str] = field(default_factory=dict)
     source_mtimes: dict[str, float] = field(default_factory=dict)
     build_duration: float = 0.0
     success: bool = True
-    error: str = ""
+    error: str = ''
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            "binary_name": self.binary_name,
-            "built_at": self.built_at,
-            "source_commit": self.source_commit,
-            "source_hashes": self.source_hashes,
-            "source_mtimes": self.source_mtimes,
-            "build_duration": self.build_duration,
-            "success": self.success,
-            "error": self.error,
+            'binary_name': self.binary_name,
+            'built_at': self.built_at,
+            'source_commit': self.source_commit,
+            'source_hashes': self.source_hashes,
+            'source_mtimes': self.source_mtimes,
+            'build_duration': self.build_duration,
+            'success': self.success,
+            'error': self.error,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BuildRecord:
         """Create from dictionary."""
         return cls(
-            binary_name=data["binary_name"],
-            built_at=data["built_at"],
-            source_commit=data.get("source_commit", ""),
-            source_hashes=data.get("source_hashes", {}),
-            source_mtimes=data.get("source_mtimes", {}),
-            build_duration=data.get("build_duration", 0.0),
-            success=data.get("success", True),
-            error=data.get("error", ""),
+            binary_name=data['binary_name'],
+            built_at=data['built_at'],
+            source_commit=data.get('source_commit', ''),
+            source_hashes=data.get('source_hashes', {}),
+            source_mtimes=data.get('source_mtimes', {}),
+            build_duration=data.get('build_duration', 0.0),
+            success=data.get('success', True),
+            error=data.get('error', ''),
         )
 
 
@@ -963,27 +966,27 @@ class BuildManifest:
     """Manifest tracking all binary builds."""
 
     records: dict[str, BuildRecord] = field(default_factory=dict)
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: str = ''
+    updated_at: str = ''
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "records": {name: record.to_dict() for name, record in self.records.items()},
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+            'records': {name: record.to_dict() for name, record in self.records.items()},
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BuildManifest:
         """Create from dictionary."""
         records = {}
-        for name, record_data in data.get("records", {}).items():
+        for name, record_data in data.get('records', {}).items():
             records[name] = BuildRecord.from_dict(record_data)
         return cls(
             records=records,
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
+            created_at=data.get('created_at', ''),
+            updated_at=data.get('updated_at', ''),
         )
 
 
@@ -996,10 +999,10 @@ class ShadowConflict:
     scope: InstallScope
     binary_type: BinaryType
     is_executable: bool = False
-    description: str = ""
+    description: str = ''
 
     def __str__(self) -> str:
-        scope_str = "system" if self.scope == InstallScope.SYSTEM else "user"
+        scope_str = 'system' if self.scope == InstallScope.SYSTEM else 'user'
         return f"{self.path} ({scope_str})"
 
 
@@ -1009,16 +1012,16 @@ class BinaryStatusResult:
 
     name: str
     status: BinaryStatus
-    install_path: str = ""
+    install_path: str = ''
     exists: bool = False
     executable: bool = False
     in_path: bool = False
-    last_built: str = ""
-    last_commit: str = ""
-    current_commit: str = ""
+    last_built: str = ''
+    last_commit: str = ''
+    current_commit: str = ''
     commits_behind: int = 0
     stale_files: list[str] = field(default_factory=list)
-    message: str = ""
+    message: str = ''
     shadow_conflicts: list[ShadowConflict] = field(default_factory=list)
 
 
@@ -1029,8 +1032,8 @@ class RebuildResult:
     name: str
     status: RebuildStatus
     duration: float = 0.0
-    message: str = ""
-    output: str = ""
+    message: str = ''
+    output: str = ''
 
 
 @dataclass
@@ -1039,9 +1042,9 @@ class CodesignResult:
 
     name: str
     status: CodesignStatus
-    identity: str = ""
-    message: str = ""
-    details: str = ""
+    identity: str = ''
+    message: str = ''
+    details: str = ''
 
 
 @dataclass
@@ -1058,42 +1061,42 @@ class TrackResult:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON output."""
         return {
-            "all_current": self.all_current,
-            "stale_count": self.stale_count,
-            "missing_count": self.missing_count,
-            "dry_run": self.dry_run,
-            "statuses": [
+            'all_current': self.all_current,
+            'stale_count': self.stale_count,
+            'missing_count': self.missing_count,
+            'dry_run': self.dry_run,
+            'statuses': [
                 {
-                    "name": s.name,
-                    "status": s.status.value,
-                    "install_path": s.install_path,
-                    "exists": s.exists,
-                    "executable": s.executable,
-                    "in_path": s.in_path,
-                    "last_built": s.last_built,
-                    "commits_behind": s.commits_behind,
-                    "stale_files": s.stale_files,
-                    "message": s.message,
-                    "shadow_conflicts": [
+                    'name': s.name,
+                    'status': s.status.value,
+                    'install_path': s.install_path,
+                    'exists': s.exists,
+                    'executable': s.executable,
+                    'in_path': s.in_path,
+                    'last_built': s.last_built,
+                    'commits_behind': s.commits_behind,
+                    'stale_files': s.stale_files,
+                    'message': s.message,
+                    'shadow_conflicts': [
                         {
-                            "name": c.name,
-                            "path": str(c.path),
-                            "scope": c.scope.value,
-                            "binary_type": c.binary_type.value,
-                            "is_executable": c.is_executable,
-                            "description": c.description,
+                            'name': c.name,
+                            'path': str(c.path),
+                            'scope': c.scope.value,
+                            'binary_type': c.binary_type.value,
+                            'is_executable': c.is_executable,
+                            'description': c.description,
                         }
                         for c in s.shadow_conflicts
                     ],
                 }
                 for s in self.statuses
             ],
-            "rebuilds": [
+            'rebuilds': [
                 {
-                    "name": r.name,
-                    "status": r.status.value,
-                    "duration": r.duration,
-                    "message": r.message,
+                    'name': r.name,
+                    'status': r.status.value,
+                    'duration': r.duration,
+                    'message': r.message,
                 }
                 for r in self.rebuilds
             ],
@@ -1113,46 +1116,46 @@ def set_global_track_config(config: TrackConfig) -> None:
 def get_git_binary_for_track() -> str:
     """Get the configured git binary path."""
     if _global_track_config:
-        return _global_track_config.system_binaries.get("git", "git")
-    return "git"
+        return _global_track_config.system_binaries.get('git', 'git')
+    return 'git'
 
 
 def get_codesign_binary() -> str:
     """Get the configured codesign binary path."""
     if _global_track_config:
-        return _global_track_config.system_binaries.get("codesign", "codesign")
-    return "codesign"
+        return _global_track_config.system_binaries.get('codesign', 'codesign')
+    return 'codesign'
 
 
 class Colors:
     """ANSI color codes for terminal output."""
 
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    GRAY = "\033[90m"
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    GRAY = '\033[90m'
 
     @classmethod
     def disable(cls) -> None:
         """Disable colors for non-TTY output."""
-        cls.RESET = ""
-        cls.BOLD = ""
-        cls.DIM = ""
-        cls.RED = ""
-        cls.GREEN = ""
-        cls.YELLOW = ""
-        cls.BLUE = ""
-        cls.MAGENTA = ""
-        cls.CYAN = ""
-        cls.WHITE = ""
-        cls.GRAY = ""
+        cls.RESET = ''
+        cls.BOLD = ''
+        cls.DIM = ''
+        cls.RED = ''
+        cls.GREEN = ''
+        cls.YELLOW = ''
+        cls.BLUE = ''
+        cls.MAGENTA = ''
+        cls.CYAN = ''
+        cls.WHITE = ''
+        cls.GRAY = ''
 
 
 class Logger:
@@ -1210,7 +1213,7 @@ def load_config_file(config_path: Path | None = None, root_dir: Path | None = No
     if config_path:
         full_path = root_dir / config_path
         if full_path.exists():
-            with open(full_path, encoding="utf-8") as f:
+            with open(full_path, encoding='utf-8') as f:
                 data: ConfigDict = json.load(f)
                 return data
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -1219,7 +1222,7 @@ def load_config_file(config_path: Path | None = None, root_dir: Path | None = No
     for filename in CONFIG_FILE_NAMES:
         full_path = root_dir / filename
         if full_path.exists():
-            with open(full_path, encoding="utf-8") as f:
+            with open(full_path, encoding='utf-8') as f:
                 data = json.load(f)
                 return data
 
@@ -1230,20 +1233,20 @@ def load_env_config() -> ConfigDict:
     """Load configuration from environment variables."""
     config: ConfigDict = {}
 
-    if os.environ.get("BINARY_TRACK_AUTO_REBUILD") == "true":
-        config["auto_rebuild"] = True
-    if os.environ.get("BINARY_TRACK_POLICY"):
-        config["pre_commit_policy"] = os.environ["BINARY_TRACK_POLICY"]
+    if os.environ.get('BINARY_TRACK_AUTO_REBUILD') == 'true':
+        config['auto_rebuild'] = True
+    if os.environ.get('BINARY_TRACK_POLICY'):
+        config['pre_commit_policy'] = os.environ['BINARY_TRACK_POLICY']
 
     # Codesigning environment variables
-    codesign_enabled = os.environ.get("BINARY_TRACK_CODESIGN") == "true"
-    codesign_identity = os.environ.get("BINARY_TRACK_CODESIGN_ID")
+    codesign_enabled = os.environ.get('BINARY_TRACK_CODESIGN') == 'true'
+    codesign_identity = os.environ.get('BINARY_TRACK_CODESIGN_ID')
     if codesign_enabled or codesign_identity:
-        config["codesign"] = {
-            "enabled": codesign_enabled,
+        config['codesign'] = {
+            'enabled': codesign_enabled,
         }
         if codesign_identity:
-            config["codesign"]["identity"] = codesign_identity
+            config['codesign']['identity'] = codesign_identity
 
     return config
 
@@ -1255,7 +1258,7 @@ def save_manifest(manifest: BuildManifest, root_dir: Path) -> None:
         manifest.created_at = manifest.updated_at
 
     manifest_path = root_dir / BUILD_MANIFEST_FILE
-    with open(manifest_path, "w", encoding="utf-8") as f:
+    with open(manifest_path, 'w', encoding='utf-8') as f:
         json.dump(manifest.to_dict(), f, indent=2)
 
 
@@ -1266,7 +1269,7 @@ def load_manifest(root_dir: Path) -> BuildManifest:
         return BuildManifest()
 
     try:
-        with open(manifest_path, encoding="utf-8") as f:
+        with open(manifest_path, encoding='utf-8') as f:
             data = json.load(f)
         return BuildManifest.from_dict(data)
     except (json.JSONDecodeError, KeyError):
@@ -1277,7 +1280,7 @@ def get_git_root(path: Path) -> Path | None:
     """Get the git repository root."""
     try:
         result = subprocess.run(
-            [get_git_binary_for_track(), "rev-parse", "--show-toplevel"],
+            [get_git_binary_for_track(), 'rev-parse', '--show-toplevel'],
             cwd=path,
             capture_output=True,
             text=True,
@@ -1292,7 +1295,7 @@ def get_current_commit(root_dir: Path) -> str:
     """Get the current git commit SHA."""
     try:
         result = subprocess.run(
-            [get_git_binary_for_track(), "rev-parse", "HEAD"],
+            [get_git_binary_for_track(), 'rev-parse', 'HEAD'],
             cwd=root_dir,
             capture_output=True,
             text=True,
@@ -1300,7 +1303,7 @@ def get_current_commit(root_dir: Path) -> str:
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+        return ''
 
 
 def get_commit_for_files(root_dir: Path, patterns: list[str]) -> str:
@@ -1309,11 +1312,11 @@ def get_commit_for_files(root_dir: Path, patterns: list[str]) -> str:
         # Expand patterns to actual files
         files = expand_patterns(root_dir, patterns)
         if not files:
-            return ""
+            return ''
 
         # Get most recent commit that touched any of these files
         result = subprocess.run(
-            [get_git_binary_for_track(), "log", "-1", "--format=%H", "--"] + [str(f) for f in files],
+            [get_git_binary_for_track(), 'log', '-1', '--format=%H', '--'] + [str(f) for f in files],
             cwd=root_dir,
             capture_output=True,
             text=True,
@@ -1321,7 +1324,7 @@ def get_commit_for_files(root_dir: Path, patterns: list[str]) -> str:
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+        return ''
 
 
 def get_commits_between(root_dir: Path, old_commit: str, new_commit: str) -> int:
@@ -1330,7 +1333,7 @@ def get_commits_between(root_dir: Path, old_commit: str, new_commit: str) -> int
         return -1
     try:
         result = subprocess.run(
-            [get_git_binary_for_track(), "rev-list", "--count", f"{old_commit}..{new_commit}"],
+            [get_git_binary_for_track(), 'rev-list', '--count', f"{old_commit}..{new_commit}"],
             cwd=root_dir,
             capture_output=True,
             text=True,
@@ -1346,7 +1349,7 @@ def expand_patterns(root_dir: Path, patterns: list[str]) -> list[Path]:
     files: list[Path] = []
     for pattern in patterns:
         # Handle ** for recursive matching
-        if "**" in pattern:
+        if '**' in pattern:
             matched = list(root_dir.glob(pattern))
         else:
             matched = list(root_dir.glob(pattern))
@@ -1358,20 +1361,20 @@ def expand_patterns(root_dir: Path, patterns: list[str]) -> list[Path]:
     return files
 
 
-def compute_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
+def compute_file_hash(file_path: Path, algorithm: str = 'sha256') -> str:
     """Compute hash of file contents."""
     hash_func = hashlib.new(algorithm)
     try:
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
                 hash_func.update(chunk)
         return hash_func.hexdigest()
     except OSError:
-        return ""
+        return ''
 
 
 def get_source_fingerprint(
-    root_dir: Path, patterns: list[str], method: TrackingMethod
+    root_dir: Path, patterns: list[str], method: TrackingMethod,
 ) -> tuple[str, dict[str, str], dict[str, float]]:
     """Get a fingerprint of source files using the specified method.
 
@@ -1388,7 +1391,7 @@ def get_source_fingerprint(
         for f in files:
             rel_path = str(f.relative_to(root_dir))
             hashes[rel_path] = compute_file_hash(f)
-        return "", hashes, {}
+        return '', hashes, {}
 
     elif method == TrackingMethod.MTIME:
         mtimes = {}
@@ -1398,9 +1401,9 @@ def get_source_fingerprint(
                 mtimes[rel_path] = f.stat().st_mtime
             except OSError:
                 pass
-        return "", {}, mtimes
+        return '', {}, mtimes
 
-    return "", {}, {}
+    return '', {}, {}
 
 
 def is_binary_stale(
@@ -1414,26 +1417,26 @@ def is_binary_stale(
     Returns: (is_stale, reason, list_of_changed_files)
     """
     if not build_record:
-        return True, "never built", []
+        return True, 'never built', []
 
     current_commit, current_hashes, current_mtimes = get_source_fingerprint(
-        root_dir, binary_config.source_patterns, method
+        root_dir, binary_config.source_patterns, method,
     )
 
     if method == TrackingMethod.GIT_COMMIT:
         if not current_commit:
-            return False, "could not determine source commit", []
+            return False, 'could not determine source commit', []
         if not build_record.source_commit:
-            return True, "no build commit recorded", []
+            return True, 'no build commit recorded', []
         if current_commit != build_record.source_commit:
             commits_behind = get_commits_between(root_dir, build_record.source_commit, current_commit)
             return True, f"source is {commits_behind} commit(s) ahead", []
-        return False, "up to date", []
+        return False, 'up to date', []
 
     elif method == TrackingMethod.HASH:
         changed = []
         for path, new_hash in current_hashes.items():
-            old_hash = build_record.source_hashes.get(path, "")
+            old_hash = build_record.source_hashes.get(path, '')
             if old_hash != new_hash:
                 changed.append(path)
         # Check for new files
@@ -1443,16 +1446,16 @@ def is_binary_stale(
                     changed.append(path)
         if changed:
             return True, f"{len(changed)} file(s) changed", changed
-        return False, "up to date", []
+        return False, 'up to date', []
 
     elif method == TrackingMethod.MTIME:
         binary_path = binary_config.get_expanded_install_path()
         if not binary_path.exists():
-            return True, "binary missing", []
+            return True, 'binary missing', []
         try:
             binary_mtime = binary_path.stat().st_mtime
         except OSError:
-            return True, "could not stat binary", []
+            return True, 'could not stat binary', []
 
         changed = []
         for path, mtime in current_mtimes.items():
@@ -1460,9 +1463,9 @@ def is_binary_stale(
                 changed.append(path)
         if changed:
             return True, f"{len(changed)} file(s) modified after build", changed
-        return False, "up to date", []
+        return False, 'up to date', []
 
-    return False, "unknown tracking method", []
+    return False, 'unknown tracking method', []
 
 
 def check_binary_health(binary_config: BinaryConfig) -> BinaryStatusResult:
@@ -1482,14 +1485,16 @@ def check_binary_health(binary_config: BinaryConfig) -> BinaryStatusResult:
         binary_config.binary_type,
     )
     for conflict_path, conflict_scope, description in conflicts:
-        result.shadow_conflicts.append(ShadowConflict(
-            name=binary_name,
-            path=conflict_path,
-            scope=conflict_scope,
-            binary_type=binary_config.binary_type,
-            is_executable=os.access(conflict_path, os.X_OK) if conflict_path.exists() else False,
-            description=description,
-        ))
+        result.shadow_conflicts.append(
+            ShadowConflict(
+                name=binary_name,
+                path=conflict_path,
+                scope=conflict_scope,
+                binary_type=binary_config.binary_type,
+                is_executable=os.access(conflict_path, os.X_OK) if conflict_path.exists() else False,
+                description=description,
+            ),
+        )
 
     # Check if file exists
     if not path.exists():
@@ -1502,7 +1507,7 @@ def check_binary_health(binary_config: BinaryConfig) -> BinaryStatusResult:
     # Check if executable
     if not os.access(path, os.X_OK):
         result.status = BinaryStatus.NOT_EXECUTABLE
-        result.message = "Binary exists but is not executable"
+        result.message = 'Binary exists but is not executable'
         return result
 
     result.executable = True
@@ -1546,7 +1551,7 @@ def get_binary_status(
 
     # Check staleness
     is_stale, reason, changed_files = is_binary_stale(
-        binary_config, build_record, config.root_dir, config.track_by
+        binary_config, build_record, config.root_dir, config.track_by,
     )
 
     if is_stale:
@@ -1560,11 +1565,11 @@ def get_binary_status(
             result.current_commit = current_commit
             if build_record.source_commit:
                 result.commits_behind = get_commits_between(
-                    config.root_dir, build_record.source_commit, current_commit
+                    config.root_dir, build_record.source_commit, current_commit,
                 )
     else:
         if result.status == BinaryStatus.CURRENT:
-            result.message = "Up to date"
+            result.message = 'Up to date'
 
     return result
 
@@ -1579,7 +1584,7 @@ def rebuild_binary(
     result = RebuildResult(name=binary_config.name, status=RebuildStatus.SKIPPED)
 
     if not binary_config.build_cmd:
-        result.message = "No build command configured"
+        result.message = 'No build command configured'
         return result
 
     if config.dry_run:
@@ -1619,7 +1624,7 @@ def rebuild_binary(
 
             # Update manifest
             current_commit, current_hashes, current_mtimes = get_source_fingerprint(
-                config.root_dir, binary_config.source_patterns, config.track_by
+                config.root_dir, binary_config.source_patterns, config.track_by,
             )
             manifest.records[binary_config.name] = BuildRecord(
                 binary_name=binary_config.name,
@@ -1644,7 +1649,7 @@ def rebuild_binary(
             result.output = proc.stderr or proc.stdout
             logger.error(f"Failed to rebuild {binary_config.name}: {result.message}")
             if result.output and config.verbose:
-                for line in result.output.strip().split("\n"):
+                for line in result.output.strip().split('\n'):
                     logger.debug(f"  {line}")
 
     except subprocess.TimeoutExpired:
@@ -1676,7 +1681,7 @@ def verify_signature(binary_path: Path, logger: Logger) -> CodesignResult:
 
     if not is_codesign_available():
         result.status = CodesignStatus.NOT_SUPPORTED
-        result.message = "codesign not available (macOS only)"
+        result.message = 'codesign not available (macOS only)'
         return result
 
     if not binary_path.exists():
@@ -1687,37 +1692,37 @@ def verify_signature(binary_path: Path, logger: Logger) -> CodesignResult:
     try:
         # Check if signed
         proc = subprocess.run(
-            [get_codesign_binary(), "-v", "--verbose=2", str(binary_path)],
+            [get_codesign_binary(), '-v', '--verbose=2', str(binary_path)],
             capture_output=True,
             text=True,
         )
 
         if proc.returncode == 0:
             result.status = CodesignStatus.VALID
-            result.message = "Valid signature"
+            result.message = 'Valid signature'
             result.details = proc.stderr.strip()  # codesign outputs to stderr
 
             # Extract identity
             display_proc = subprocess.run(
-                [get_codesign_binary(), "-d", "--verbose=2", str(binary_path)],
+                [get_codesign_binary(), '-d', '--verbose=2', str(binary_path)],
                 capture_output=True,
                 text=True,
             )
-            for line in display_proc.stderr.split("\n"):
-                if line.startswith("Authority="):
-                    result.identity = line.split("=", 1)[1]
+            for line in display_proc.stderr.split('\n'):
+                if line.startswith('Authority='):
+                    result.identity = line.split('=', 1)[1]
                     break
-                elif "signed with a" in line.lower():
-                    result.identity = "ad-hoc"
+                elif 'signed with a' in line.lower():
+                    result.identity = 'ad-hoc'
                     break
         else:
             # Check if unsigned or invalid
-            if "not signed" in proc.stderr.lower():
+            if 'not signed' in proc.stderr.lower():
                 result.status = CodesignStatus.UNSIGNED
-                result.message = "Binary is not signed"
+                result.message = 'Binary is not signed'
             else:
                 result.status = CodesignStatus.INVALID
-                result.message = "Invalid signature"
+                result.message = 'Invalid signature'
                 result.details = proc.stderr.strip()
 
     except Exception as e:
@@ -1742,12 +1747,12 @@ def codesign_binary(
     cs_config = binary_config.codesign
 
     if not cs_config.enabled:
-        result.message = "Codesigning not enabled for this binary"
+        result.message = 'Codesigning not enabled for this binary'
         return result
 
     if not is_codesign_available():
         result.status = CodesignStatus.NOT_SUPPORTED
-        result.message = "codesign not available (macOS only)"
+        result.message = 'codesign not available (macOS only)'
         return result
 
     binary_path = binary_config.get_expanded_install_path()
@@ -1761,7 +1766,7 @@ def codesign_binary(
         result.status = CodesignStatus.SKIPPED
         cmd_preview = f"codesign -s '{cs_config.identity}'"
         if cs_config.force:
-            cmd_preview += " -f"
+            cmd_preview += ' -f'
         if cs_config.options:
             cmd_preview += f" --options={','.join(cs_config.options)}"
         if cs_config.entitlements:
@@ -1774,10 +1779,10 @@ def codesign_binary(
     logger.info(f"Signing {binary_config.name}...")
 
     # Build codesign command
-    cmd = [get_codesign_binary(), "-s", cs_config.identity]
+    cmd = [get_codesign_binary(), '-s', cs_config.identity]
 
     if cs_config.force:
-        cmd.append("-f")
+        cmd.append('-f')
 
     if cs_config.options:
         cmd.append(f"--options={','.join(cs_config.options)}")
@@ -1804,7 +1809,7 @@ def codesign_binary(
         if proc.returncode == 0:
             result.status = CodesignStatus.SIGNED
             result.identity = cs_config.identity
-            result.message = "Successfully signed"
+            result.message = 'Successfully signed'
             logger.success(f"Signed {binary_config.name} with identity '{cs_config.identity}'")
         else:
             result.status = CodesignStatus.FAILED
@@ -1825,10 +1830,10 @@ def codesign_all_binaries(config: TrackConfig, logger: Logger) -> list[CodesignR
     results: list[CodesignResult] = []
 
     if not is_codesign_available():
-        logger.warn("codesign not available (macOS only)")
+        logger.warn('codesign not available (macOS only)')
         return results
 
-    logger.header("Codesigning Binaries")
+    logger.header('Codesigning Binaries')
 
     for name, binary_config in config.binaries.items():
         if not binary_config.codesign.enabled:
@@ -1848,7 +1853,7 @@ def codesign_all_binaries(config: TrackConfig, logger: Logger) -> list[CodesignR
         if failed > 0:
             logger.error(f"Failed to sign {failed} binary(ies)")
         if not results:
-            logger.info("No binaries configured for codesigning")
+            logger.info('No binaries configured for codesigning')
 
     return results
 
@@ -1858,10 +1863,10 @@ def verify_all_signatures(config: TrackConfig, logger: Logger) -> list[CodesignR
     results: list[CodesignResult] = []
 
     if not is_codesign_available():
-        logger.warn("codesign not available (macOS only)")
+        logger.warn('codesign not available (macOS only)')
         return results
 
-    logger.header("Signature Verification")
+    logger.header('Signature Verification')
 
     for name, binary_config in config.binaries.items():
         binary_path = binary_config.get_expanded_install_path()
@@ -1871,19 +1876,19 @@ def verify_all_signatures(config: TrackConfig, logger: Logger) -> list[CodesignR
 
         # Display status
         if result.status == CodesignStatus.VALID:
-            icon = "✓"
+            icon = '✓'
             color = Colors.GREEN
             detail = f"Signed ({result.identity or 'valid'})"
         elif result.status == CodesignStatus.UNSIGNED:
-            icon = "○"
+            icon = '○'
             color = Colors.YELLOW
-            detail = "Unsigned"
+            detail = 'Unsigned'
         elif result.status == CodesignStatus.INVALID:
-            icon = "✗"
+            icon = '✗'
             color = Colors.RED
             detail = f"Invalid: {result.message}"
         else:
-            icon = "?"
+            icon = '?'
             color = Colors.GRAY
             detail = result.message
 
@@ -1912,17 +1917,17 @@ def show_install_locations(logger: Logger, json_output: bool = False) -> None:
 
     if json_output:
         output = {
-            "platform": current_platform.value,
-            "locations": [
+            'platform': current_platform.value,
+            'locations': [
                 {
-                    "path": str(loc.path),
-                    "scope": loc.scope.value,
-                    "binary_type": loc.binary_type.value,
-                    "description": loc.description,
-                    "exists": loc.exists(),
-                    "writable": loc.is_writable(),
-                    "in_path": is_path_in_system_path(loc.path) if loc.binary_type == BinaryType.CLI else None,
-                    "requires_admin": loc.requires_admin,
+                    'path': str(loc.path),
+                    'scope': loc.scope.value,
+                    'binary_type': loc.binary_type.value,
+                    'description': loc.description,
+                    'exists': loc.exists(),
+                    'writable': loc.is_writable(),
+                    'in_path': is_path_in_system_path(loc.path) if loc.binary_type == BinaryType.CLI else None,
+                    'requires_admin': loc.requires_admin,
                 }
                 for loc in locations
             ],
@@ -1939,12 +1944,12 @@ def show_install_locations(logger: Logger, json_output: bool = False) -> None:
         if not bt_locations:
             continue
 
-        type_label = "CLI Tools" if bt == BinaryType.CLI else "GUI Applications"
+        type_label = 'CLI Tools' if bt == BinaryType.CLI else 'GUI Applications'
         print(f"{Colors.BOLD}{type_label}:{Colors.RESET}")
         print()
 
         for loc in bt_locations:
-            scope_label = "[user]  " if loc.scope == InstallScope.USER else "[system]"
+            scope_label = '[user]  ' if loc.scope == InstallScope.USER else '[system]'
             path_str = str(loc.path)
 
             # Status indicators
@@ -1964,7 +1969,7 @@ def show_install_locations(logger: Logger, json_output: bool = False) -> None:
             elif bt == BinaryType.CLI:
                 indicators.append(f"{Colors.YELLOW}not in PATH{Colors.RESET}")
 
-            status_str = ", ".join(indicators)
+            status_str = ', '.join(indicators)
             print(f"  {scope_label} {path_str}")
             print(f"           {Colors.DIM}{loc.description}{Colors.RESET}")
             print(f"           {status_str}")
@@ -1983,7 +1988,7 @@ def check_all_binaries(config: TrackConfig, logger: Logger) -> TrackResult:
     result = TrackResult(dry_run=config.dry_run)
     manifest = load_manifest(config.root_dir)
 
-    logger.header("Binary Status")
+    logger.header('Binary Status')
 
     shadow_warnings: list[tuple[str, list[ShadowConflict]]] = []
 
@@ -1997,13 +2002,13 @@ def check_all_binaries(config: TrackConfig, logger: Logger) -> TrackResult:
 
         # Display status
         if status.status == BinaryStatus.CURRENT:
-            logger.status_line("✓", Colors.GREEN, name, f"- {status.message}")
+            logger.status_line('✓', Colors.GREEN, name, f"- {status.message}")
         elif status.status == BinaryStatus.STALE:
             result.stale_count += 1
             detail = status.message
             if status.commits_behind > 0:
                 detail = f"- {status.commits_behind} commit(s) behind"
-            logger.status_line("⚠", Colors.YELLOW, name, f"- STALE {detail}")
+            logger.status_line('⚠', Colors.YELLOW, name, f"- STALE {detail}")
             if status.stale_files and config.verbose:
                 for f in status.stale_files[:5]:
                     logger.debug(f"    └ {f}")
@@ -2011,25 +2016,25 @@ def check_all_binaries(config: TrackConfig, logger: Logger) -> TrackResult:
                     logger.debug(f"    └ ... and {len(status.stale_files) - 5} more")
         elif status.status == BinaryStatus.MISSING:
             result.missing_count += 1
-            logger.status_line("✗", Colors.RED, name, f"- MISSING at {status.install_path}")
+            logger.status_line('✗', Colors.RED, name, f"- MISSING at {status.install_path}")
         elif status.status == BinaryStatus.NOT_EXECUTABLE:
-            logger.status_line("✗", Colors.RED, name, "- NOT EXECUTABLE")
+            logger.status_line('✗', Colors.RED, name, '- NOT EXECUTABLE')
         elif status.status == BinaryStatus.NOT_IN_PATH:
-            logger.status_line("⚠", Colors.YELLOW, name, f"- {status.message}")
+            logger.status_line('⚠', Colors.YELLOW, name, f"- {status.message}")
         else:
-            logger.status_line("?", Colors.GRAY, name, f"- {status.message}")
+            logger.status_line('?', Colors.GRAY, name, f"- {status.message}")
 
     result.all_current = result.stale_count == 0 and result.missing_count == 0
 
     # Display shadow warnings
     if shadow_warnings and not config.quiet and not config.json_output:
         print()
-        logger.header("Shadow Conflicts")
+        logger.header('Shadow Conflicts')
         print(f"  {Colors.YELLOW}Binaries with the same name exist in multiple locations:{Colors.RESET}")
         print()
         for name, conflicts in shadow_warnings:
             install_path = next(
-                (s.install_path for s in result.statuses if s.name == name), ""
+                (s.install_path for s in result.statuses if s.name == name), '',
             )
             print(f"  {Colors.BOLD}{name}{Colors.RESET} (installed at {install_path})")
             for conflict in conflicts:
@@ -2038,7 +2043,7 @@ def check_all_binaries(config: TrackConfig, logger: Logger) -> TrackResult:
                     conflict.path,
                 )
                 scope_label = f"[{conflict.scope.value}]"
-                exec_status = "executable" if conflict.is_executable else "not executable"
+                exec_status = 'executable' if conflict.is_executable else 'not executable'
                 print(f"    {Colors.YELLOW}⚠{Colors.RESET} Also at: {conflict.path}")
                 print(f"      {scope_label} {exec_status} - {priority}")
             print()
@@ -2084,7 +2089,7 @@ def rebuild_stale_binaries(config: TrackConfig, logger: Logger, rebuild_all: boo
             binaries_to_rebuild.append(binary_config)
 
     if not binaries_to_rebuild:
-        logger.success("All binaries are up to date")
+        logger.success('All binaries are up to date')
         result.all_current = True
         return result
 
@@ -2130,25 +2135,25 @@ def verify_binaries(config: TrackConfig, logger: Logger) -> TrackResult:
     """Verify all binaries exist and are healthy."""
     result = TrackResult(dry_run=config.dry_run)
 
-    logger.header("Binary Health Check")
+    logger.header('Binary Health Check')
 
     for name, binary_config in config.binaries.items():
         status = check_binary_health(binary_config)
         result.statuses.append(status)
 
         if status.status == BinaryStatus.CURRENT:
-            parts = ["exists", "executable"]
+            parts = ['exists', 'executable']
             if status.in_path:
-                parts.append("in PATH")
-            logger.status_line("✓", Colors.GREEN, name, f"- {', '.join(parts)}")
+                parts.append('in PATH')
+            logger.status_line('✓', Colors.GREEN, name, f"- {', '.join(parts)}")
         elif status.status == BinaryStatus.MISSING:
             result.missing_count += 1
-            logger.status_line("✗", Colors.RED, name, f"- MISSING at {status.install_path}")
+            logger.status_line('✗', Colors.RED, name, f"- MISSING at {status.install_path}")
         elif status.status == BinaryStatus.NOT_EXECUTABLE:
-            logger.status_line("✗", Colors.RED, name, f"- exists but not executable")
+            logger.status_line('✗', Colors.RED, name, f"- exists but not executable")
         elif status.status == BinaryStatus.NOT_IN_PATH:
             result.stale_count += 1  # Treat as issue
-            logger.status_line("⚠", Colors.YELLOW, name, f"- {status.message}")
+            logger.status_line('⚠', Colors.YELLOW, name, f"- {status.message}")
 
     result.all_current = result.missing_count == 0 and result.stale_count == 0
     return result
@@ -2163,8 +2168,8 @@ def watch_sources(config: TrackConfig, logger: Logger) -> None:
         logger.error("Watch mode requires 'watchdog' package. Install with: pip install watchdog")
         return
 
-    logger.header("Watch Mode")
-    logger.info("Watching for source changes... (Ctrl+C to stop)")
+    logger.header('Watch Mode')
+    logger.info('Watching for source changes... (Ctrl+C to stop)')
 
     # Debounce tracking
     pending_rebuilds: dict[str, float] = {}
@@ -2229,10 +2234,10 @@ def watch_sources(config: TrackConfig, logger: Logger) -> None:
     for binary_config in config.binaries.values():
         for pattern in binary_config.source_patterns:
             # Extract base directory from pattern
-            parts = pattern.split("/")
+            parts = pattern.split('/')
             base = config.root_dir
             for part in parts:
-                if "*" in part or "?" in part:
+                if '*' in part or '?' in part:
                     break
                 base = base / part
             if base.exists() and base.is_dir():
@@ -2249,7 +2254,7 @@ def watch_sources(config: TrackConfig, logger: Logger) -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("\nStopping watch mode...")
+        logger.info('\nStopping watch mode...')
         stop_event.set()
         observer.stop()
     observer.join()
@@ -2280,12 +2285,12 @@ def pre_commit_check(config: TrackConfig, logger: Logger) -> int:
 
 def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
     """Interactively add a new binary to track."""
-    logger.header("Add New Binary")
+    logger.header('Add New Binary')
 
     print()
-    name = input("Binary name: ").strip()
+    name = input('Binary name: ').strip()
     if not name:
-        logger.error("Binary name is required")
+        logger.error('Binary name is required')
         return
 
     if name in config.binaries:
@@ -2293,12 +2298,12 @@ def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
         return
 
     source_patterns_input = input("Source patterns (comma-separated, e.g. 'src/**/*.go,go.mod'): ").strip()
-    source_patterns = [p.strip() for p in source_patterns_input.split(",") if p.strip()]
+    source_patterns = [p.strip() for p in source_patterns_input.split(',') if p.strip()]
 
-    build_cmd = input("Build command: ").strip()
-    install_path = input("Install path (e.g. ~/.local/bin/mytool): ").strip()
+    build_cmd = input('Build command: ').strip()
+    install_path = input('Install path (e.g. ~/.local/bin/mytool): ').strip()
 
-    language = input("Language (go/rust/python/node/other) [optional]: ").strip()
+    language = input('Language (go/rust/python/node/other) [optional]: ').strip()
 
     # Create configuration
     new_binary = BinaryConfig(
@@ -2311,7 +2316,7 @@ def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
 
     # Show preview
     print()
-    logger.info("Configuration preview:")
+    logger.info('Configuration preview:')
     print(f"  Name: {name}")
     print(f"  Source patterns: {source_patterns}")
     print(f"  Build command: {build_cmd}")
@@ -2320,30 +2325,30 @@ def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
         print(f"  Language: {language}")
 
     print()
-    confirm = input("Save this configuration? [y/N]: ").strip().lower()
-    if confirm != "y":
-        logger.info("Cancelled")
+    confirm = input('Save this configuration? [y/N]: ').strip().lower()
+    if confirm != 'y':
+        logger.info('Cancelled')
         return
 
     # Load existing config file or create new one
     config_path = config.root_dir / CONFIG_FILE_NAMES[0]
     if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
+        with open(config_path, encoding='utf-8') as f:
             file_config = json.load(f)
     else:
-        file_config = {"binaries": {}}
+        file_config = {'binaries': {}}
 
-    if "binaries" not in file_config:
-        file_config["binaries"] = {}
+    if 'binaries' not in file_config:
+        file_config['binaries'] = {}
 
-    file_config["binaries"][name] = {
-        "source_patterns": source_patterns,
-        "build_cmd": build_cmd,
-        "install_path": install_path,
-        "language": language,
+    file_config['binaries'][name] = {
+        'source_patterns': source_patterns,
+        'build_cmd': build_cmd,
+        'install_path': install_path,
+        'language': language,
     }
 
-    with open(config_path, "w", encoding="utf-8") as f:
+    with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(file_config, f, indent=2)
 
     logger.success(f"Added '{name}' to {config_path}")
@@ -2360,13 +2365,13 @@ def remove_binary(config: TrackConfig, logger: Logger, name: str) -> None:
         logger.error(f"Configuration file not found: {config_path}")
         return
 
-    with open(config_path, encoding="utf-8") as f:
+    with open(config_path, encoding='utf-8') as f:
         file_config = json.load(f)
 
-    if "binaries" in file_config and name in file_config["binaries"]:
-        del file_config["binaries"][name]
+    if 'binaries' in file_config and name in file_config['binaries']:
+        del file_config['binaries'][name]
 
-        with open(config_path, "w", encoding="utf-8") as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(file_config, f, indent=2)
 
         # Also remove from manifest
@@ -2383,8 +2388,8 @@ def remove_binary(config: TrackConfig, logger: Logger, name: str) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        prog="binary-track",
-        description="Keep locally-installed binaries up to date with source code",
+        prog='binary-track',
+        description='Keep locally-installed binaries up to date with source code',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2426,107 +2431,107 @@ Pre-commit Integration:
     )
 
     parser.add_argument(
-        "--version",
-        action="version",
+        '--version',
+        action='version',
         version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
-        "--config",
+        '--config',
         type=Path,
-        help="Path to configuration file (default: .binariesrc.json)",
+        help='Path to configuration file (default: .binariesrc.json)',
     )
 
     # Actions (mutually exclusive main commands)
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument(
-        "--status",
-        action="store_true",
-        help="Show status of all tracked binaries",
+        '--status',
+        action='store_true',
+        help='Show status of all tracked binaries',
     )
     action_group.add_argument(
-        "--check",
-        action="store_true",
-        help="Check for stale binaries (exit 1 if any stale)",
+        '--check',
+        action='store_true',
+        help='Check for stale binaries (exit 1 if any stale)',
     )
     action_group.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Rebuild stale binaries",
+        '--rebuild',
+        action='store_true',
+        help='Rebuild stale binaries',
     )
     action_group.add_argument(
-        "--rebuild-all",
-        action="store_true",
-        help="Rebuild all tracked binaries",
+        '--rebuild-all',
+        action='store_true',
+        help='Rebuild all tracked binaries',
     )
     action_group.add_argument(
-        "--watch",
-        action="store_true",
-        help="Watch source files and rebuild on change",
+        '--watch',
+        action='store_true',
+        help='Watch source files and rebuild on change',
     )
     action_group.add_argument(
-        "--verify",
-        action="store_true",
-        help="Verify binaries exist and are executable",
+        '--verify',
+        action='store_true',
+        help='Verify binaries exist and are executable',
     )
     action_group.add_argument(
-        "--health",
-        action="store_true",
-        help="Alias for --verify",
+        '--health',
+        action='store_true',
+        help='Alias for --verify',
     )
     action_group.add_argument(
-        "--add",
-        action="store_true",
-        help="Interactively add a new binary to track",
+        '--add',
+        action='store_true',
+        help='Interactively add a new binary to track',
     )
     action_group.add_argument(
-        "--remove",
-        metavar="NAME",
-        help="Remove a binary from tracking",
+        '--remove',
+        metavar='NAME',
+        help='Remove a binary from tracking',
     )
     action_group.add_argument(
-        "--pre-commit",
-        action="store_true",
-        help="Run pre-commit check (respects policy setting)",
+        '--pre-commit',
+        action='store_true',
+        help='Run pre-commit check (respects policy setting)',
     )
     action_group.add_argument(
-        "--codesign",
-        action="store_true",
-        help="Sign all binaries that have codesigning enabled (macOS)",
+        '--codesign',
+        action='store_true',
+        help='Sign all binaries that have codesigning enabled (macOS)',
     )
     action_group.add_argument(
-        "--verify-signature",
-        action="store_true",
-        help="Verify codesign signatures of all binaries (macOS)",
+        '--verify-signature',
+        action='store_true',
+        help='Verify codesign signatures of all binaries (macOS)',
     )
     action_group.add_argument(
-        "--show-paths",
-        action="store_true",
-        help="Show default install locations for current platform",
+        '--show-paths',
+        action='store_true',
+        help='Show default install locations for current platform',
     )
 
     # Options
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview changes without executing",
+        '--dry-run',
+        action='store_true',
+        help='Preview changes without executing',
     )
     parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Show detailed output",
+        '--verbose',
+        '-v',
+        action='store_true',
+        help='Show detailed output',
     )
     parser.add_argument(
-        "--quiet",
-        "-q",
-        action="store_true",
-        help="Suppress all output except errors",
+        '--quiet',
+        '-q',
+        action='store_true',
+        help='Suppress all output except errors',
     )
     parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output in JSON format",
+        '--json',
+        action='store_true',
+        dest='json_output',
+        help='Output in JSON format',
     )
 
     return parser.parse_args(argv)
@@ -2555,9 +2560,9 @@ def main(argv: list[str] | None = None) -> int:
     set_global_track_config(config)
 
     # Apply CLI overrides
-    if args.dry_run or os.environ.get("BINARY_TRACK_DRY_RUN") == "true":
+    if args.dry_run or os.environ.get('BINARY_TRACK_DRY_RUN') == 'true':
         config.dry_run = True
-    if args.verbose or os.environ.get("BINARY_TRACK_VERBOSE") == "true":
+    if args.verbose or os.environ.get('BINARY_TRACK_VERBOSE') == 'true':
         config.verbose = True
     if args.quiet:
         config.quiet = True
@@ -2574,19 +2579,19 @@ def main(argv: list[str] | None = None) -> int:
     # Check if we have any binaries configured (for most actions)
     if not config.binaries and not args.add:
         if not args.json_output:
-            logger.info("No binaries configured. Use --add to add a binary or create .binariesrc.json")
-            logger.info("\nExample configuration:")
+            logger.info('No binaries configured. Use --add to add a binary or create .binariesrc.json')
+            logger.info('\nExample configuration:')
             example = {
-                "binaries": {
-                    "mytool": {
-                        "source_patterns": ["cmd/mytool/**/*.go", "internal/**/*.go"],
-                        "build_cmd": "go build -o ~/.local/bin/mytool ./cmd/mytool",
-                        "install_path": "~/.local/bin/mytool",
-                        "language": "go",
-                    }
+                'binaries': {
+                    'mytool': {
+                        'source_patterns': ['cmd/mytool/**/*.go', 'internal/**/*.go'],
+                        'build_cmd': 'go build -o ~/.local/bin/mytool ./cmd/mytool',
+                        'install_path': '~/.local/bin/mytool',
+                        'language': 'go',
+                    },
                 },
-                "track_by": "git_commit",
-                "pre_commit_policy": "warn",
+                'track_by': 'git_commit',
+                'pre_commit_policy': 'warn',
             }
             print(json.dumps(example, indent=2))
         return 0
@@ -2627,7 +2632,7 @@ def main(argv: list[str] | None = None) -> int:
             results = codesign_all_binaries(config, logger)
             if config.json_output:
                 output = [
-                    {"name": r.name, "status": r.status.value, "identity": r.identity, "message": r.message}
+                    {'name': r.name, 'status': r.status.value, 'identity': r.identity, 'message': r.message}
                     for r in results
                 ]
                 print(json.dumps(output, indent=2))
@@ -2638,7 +2643,7 @@ def main(argv: list[str] | None = None) -> int:
             results = verify_all_signatures(config, logger)
             if config.json_output:
                 output = [
-                    {"name": r.name, "status": r.status.value, "identity": r.identity, "message": r.message}
+                    {'name': r.name, 'status': r.status.value, 'identity': r.identity, 'message': r.message}
                     for r in results
                 ]
                 print(json.dumps(output, indent=2))
@@ -2669,5 +2674,5 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

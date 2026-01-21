@@ -1,9 +1,6 @@
-- id: tidy
-  name: Tidy file organization
-  description: Move files from source to target directories based on configurable rules
-  entry: tidy
-  language: python
-  always_run: true
-  pass_filenames: false
-  types: [file]
-  minimum_pre_commit_version: "2.9.0"
+-   id: validate_manifest
+    name: validate pre-commit manifest
+    description: This validator validates a pre-commit hooks manifest file
+    entry: pre-commit validate-manifest
+    language: python
+    files: ^\.pre-commit-hooks\.yaml$

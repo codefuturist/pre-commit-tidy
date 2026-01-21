@@ -509,6 +509,31 @@ Options:
 | `REMOTE_SYNC_OFFLINE_QUEUE` | Set to `true`/`false` to enable/disable queue |
 | `REMOTE_SYNC_MAX_WORKERS` | Maximum parallel workers (default: 4) |
 
+### Custom Binary Paths
+
+If you need to use custom paths for system binaries (e.g., different versions or non-standard locations), you can configure them:
+
+```json
+{
+    "binaries": {
+        "git": "/opt/homebrew/bin/git",
+        "rsync": "/usr/local/bin/rsync",
+        "ssh": "/usr/bin/ssh"
+    }
+}
+```
+
+**Supported binaries:**
+- `git`: Git binary (default: `git`)
+- `rsync`: Rsync binary (default: `rsync`)
+- `ssh`: SSH binary (default: `ssh`)
+
+This is useful when:
+- Using a specific Git version for features/compatibility
+- Running in containerized environments with custom paths
+- Using alternative SSH implementations (e.g., Dropbear)
+- rsync installed via Homebrew or custom location
+
 ### Pre-commit Hook Integration
 
 Add remote-sync as a post-commit hook in `.pre-commit-config.yaml`:

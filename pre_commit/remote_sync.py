@@ -3,6 +3,15 @@
 Provides automated synchronization of git commits across multiple remotes
 with parallel pushing, health checks, divergence detection, and offline queuing.
 
+Features:
+    - Zero-config auto-discovery of git remotes with smart defaults
+    - Parallel pushing to multiple remotes for speed
+    - Offline queue for handling network interruptions gracefully
+    - Smart defaults based on remote type (GitHub, GitLab, etc.)
+    - Backup remote detection with higher retry counts
+    - VPN auto-connect support for corporate remotes
+    - Filesystem and rsync sync targets for local backups
+
 Usage:
     remote-sync [options]
 
@@ -14,6 +23,7 @@ Options:
     --health-check      Check connectivity to all remotes
     --process-queue     Process offline queue of failed pushes
     --clear-queue       Clear the offline queue
+    --sync-targets      Sync to configured filesystem/rsync targets
     --dry-run           Preview changes without executing
     --verbose           Show detailed output
     --quiet             Suppress all output except errors
@@ -24,8 +34,19 @@ Options:
     --help              Show this help message
     --version           Show version number
 
+Smart Defaults:
+    Works out of the box without configuration! Remotes are auto-discovered
+    with intelligent defaults based on:
+
+    - Remote name: origin gets priority 1, upstream priority 2
+    - Remote URL: GitHub, GitLab, Bitbucket detected for optimal settings
+    - Backup patterns: backup-*, mirror-*, etc. get 5+ retries
+    - Force push: blocked by default (safe)
+    - Offline queue: enabled (handles network issues)
+    - Parallel push: enabled (faster)
+
 Configuration:
-    Create a .remotesyncrc.json file in your project root:
+    Optional .remotesyncrc.json file for customization:
 
     {
         "remotes": {
@@ -34,26 +55,25 @@ Configuration:
                 "branches": ["*"],
                 "force_push": "block",
                 "retry": 3,
-                "timeout": 30
+                "timeout": 60
             },
-            "github-mirror": {
-                "priority": 2,
-                "branches": ["main", "develop"],
-                "force_push": "warn"
-            },
-            "backup": {
-                "priority": 3,
+            "backup-nas": {
+                "priority": 10,
                 "branches": ["main"],
                 "retry": 5,
-                "group": "backups"
+                "group": "backup"
             }
+        },
+        "sync_targets": {
+            "local-backup": {"path": "/Volumes/Backup/repos/myproject"},
+            "nas": {"host": "nas.local", "path": "/share/git/myproject", "user": "admin"}
         },
         "parallel": true,
         "max_workers": 4,
         "offline_queue": true,
-        "health_check_timeout": 5,
-        "retry_base_delay": 1.0,
-        "retry_max_delay": 30.0
+        "health_check_timeout": 10,
+        "auto_fetch": true,
+        "fetch_prune": true
     }
 
 Environment Variables:
@@ -93,6 +113,94 @@ QUEUE_FILE = ".remote-sync-queue.json"
 
 # Lock file for queue operations
 QUEUE_LOCK_FILE = ".remote-sync-queue.lock"
+
+# =============================================================================
+# Default Settings - Tuned for Real-World Usage
+# =============================================================================
+
+# Remote defaults
+DEFAULT_REMOTE_PRIORITY = 1
+DEFAULT_REMOTE_BRANCHES = ["*"]  # Sync all branches
+DEFAULT_FORCE_PUSH_POLICY = "block"  # Safe default - prevent accidental force push
+DEFAULT_REMOTE_RETRY = 3  # Retry count for push operations
+DEFAULT_REMOTE_TIMEOUT = 60  # Seconds - increased for large pushes
+DEFAULT_REMOTE_GROUP = "default"
+
+# Parallel execution
+DEFAULT_PARALLEL = True  # Enable parallel pushing for speed
+DEFAULT_MAX_WORKERS = 4  # Conservative for most systems
+
+# Offline queue - handles network interruptions gracefully
+DEFAULT_OFFLINE_QUEUE = True
+DEFAULT_QUEUE_MAX_RETRIES = 10  # Max retries before dropping from queue
+DEFAULT_QUEUE_MAX_AGE_DAYS = 7  # Auto-expire queue items after this many days
+
+# Retry timing with exponential backoff
+DEFAULT_RETRY_BASE_DELAY = 1.0  # Initial delay in seconds
+DEFAULT_RETRY_MAX_DELAY = 60.0  # Cap delay at 60 seconds
+DEFAULT_RETRY_JITTER = 0.1  # 10% jitter to prevent thundering herd
+
+# Health checks
+DEFAULT_HEALTH_CHECK_TIMEOUT = 10  # Seconds - reasonable for most networks
+DEFAULT_HEALTH_CHECK_INTERVAL = 300  # 5 minutes between automatic health checks
+
+# Sync operations
+DEFAULT_AUTO_FETCH = True  # Keep local refs updated before push
+DEFAULT_FETCH_PRUNE = True  # Clean up stale remote-tracking branches
+DEFAULT_PUSH_TAGS = False  # Don't push tags by default (explicit is better)
+
+# VPN defaults
+DEFAULT_VPN_TIMEOUT = 60  # Seconds to wait for VPN connection
+DEFAULT_VPN_AUTO_CONNECT = True  # Auto-connect if remote is unreachable
+
+# Sync targets (filesystem/rsync)
+DEFAULT_SYNC_DELETE = False  # Don't delete extraneous files (safe default)
+DEFAULT_RSYNC_PORT = 22
+DEFAULT_RSYNC_OPTIONS = ["-avz", "--progress"]  # Archive, verbose, compress
+
+# Known hosting providers - used for smart defaults
+KNOWN_HOSTS = {
+    "github.com": {
+        "name": "GitHub",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "gitlab.com": {
+        "name": "GitLab",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "bitbucket.org": {
+        "name": "Bitbucket",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "codeberg.org": {
+        "name": "Codeberg",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "sr.ht": {
+        "name": "SourceHut",
+        "timeout": 90,  # SourceHut can be slower
+        "retry": 5,
+        "force_push": "warn",
+    },
+}
+
+# Backup remote patterns - auto-detected for higher retry counts
+BACKUP_REMOTE_PATTERNS = [
+    "backup*",
+    "*-backup",
+    "*-mirror",
+    "mirror*",
+    "archive*",
+    "*-archive",
+]
 
 
 class ForcePushPolicy(Enum):
@@ -193,6 +301,7 @@ class ConfigDict(TypedDict, total=False):
     auto_fetch: bool
     vpn: dict[str, VpnConfigDict]  # Named VPN configurations
     sync_targets: dict[str, FilesystemTargetDict | RsyncTargetDict]  # Filesystem/rsync targets
+    binaries: dict[str, str]  # Custom binary paths (git, rsync, ssh)
 
 
 class SyncTargetType(Enum):
@@ -221,7 +330,7 @@ class FilesystemTarget:
     name: str
     path: str
     exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
-    delete: bool = False  # Delete extraneous files in destination
+    delete: bool = DEFAULT_SYNC_DELETE  # Delete extraneous files in destination
     branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
     branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.FILESYSTEM
@@ -239,7 +348,7 @@ class FilesystemTarget:
             name=name,
             path=data.get("path", ""),
             exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
-            delete=data.get("delete", False),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
             branch_mode=branch_mode,
             branch=data.get("branch", ""),
         )
@@ -253,11 +362,11 @@ class RsyncTarget:
     host: str
     path: str
     user: str = ""
-    port: int = 22
+    port: int = DEFAULT_RSYNC_PORT
     ssh_key: str = ""
     exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
-    delete: bool = False
-    options: list[str] = field(default_factory=list)  # Additional rsync options
+    delete: bool = DEFAULT_SYNC_DELETE
+    options: list[str] = field(default_factory=lambda: DEFAULT_RSYNC_OPTIONS.copy())
     branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
     branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.RSYNC
@@ -271,16 +380,23 @@ class RsyncTarget:
         except ValueError:
             branch_mode = BranchMode.MATCH
 
+        # Merge user options with defaults if provided, otherwise use defaults
+        user_options = data.get("options")
+        if user_options is not None:
+            options = user_options  # User explicitly specified, use theirs
+        else:
+            options = DEFAULT_RSYNC_OPTIONS.copy()  # Use sensible defaults
+
         return cls(
             name=name,
             host=data.get("host", ""),
             path=data.get("path", ""),
             user=data.get("user", ""),
-            port=data.get("port", 22),
+            port=data.get("port", DEFAULT_RSYNC_PORT),
             ssh_key=data.get("ssh_key", ""),
             exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
-            delete=data.get("delete", False),
-            options=data.get("options", []),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
+            options=options,
             branch_mode=branch_mode,
             branch=data.get("branch", ""),
         )
@@ -319,8 +435,8 @@ class VpnConfig:
     connect_cmd: str
     disconnect_cmd: str
     check_cmd: str = ""  # Command to check if VPN is connected
-    timeout: int = 30
-    auto_connect: bool = True  # Auto-connect if remote is unreachable
+    timeout: int = DEFAULT_VPN_TIMEOUT
+    auto_connect: bool = DEFAULT_VPN_AUTO_CONNECT
 
     @classmethod
     def from_dict(cls, name: str, data: VpnConfigDict) -> VpnConfig:
@@ -330,8 +446,8 @@ class VpnConfig:
             connect_cmd=data.get("connect_cmd", ""),
             disconnect_cmd=data.get("disconnect_cmd", ""),
             check_cmd=data.get("check_cmd", ""),
-            timeout=data.get("timeout", 30),
-            auto_connect=data.get("auto_connect", True),
+            timeout=data.get("timeout", DEFAULT_VPN_TIMEOUT),
+            auto_connect=data.get("auto_connect", DEFAULT_VPN_AUTO_CONNECT),
         )
 
 
@@ -340,19 +456,19 @@ class RemoteConfig:
     """Configuration for a single remote."""
 
     name: str
-    priority: int = 1
-    branches: list[str] = field(default_factory=lambda: ["*"])
+    priority: int = DEFAULT_REMOTE_PRIORITY
+    branches: list[str] = field(default_factory=lambda: DEFAULT_REMOTE_BRANCHES.copy())
     force_push: ForcePushPolicy = ForcePushPolicy.BLOCK
-    retry: int = 3
-    timeout: int = 30
-    group: str = "default"
+    retry: int = DEFAULT_REMOTE_RETRY
+    timeout: int = DEFAULT_REMOTE_TIMEOUT
+    group: str = DEFAULT_REMOTE_GROUP
     url: str | None = None
     vpn: str | None = None  # VPN name to use for this remote
 
     @classmethod
     def from_dict(cls, name: str, data: RemoteConfigDict) -> RemoteConfig:
         """Create from dictionary."""
-        force_push_str = data.get("force_push", "block")
+        force_push_str = data.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
         try:
             force_push = ForcePushPolicy(force_push_str)
         except ValueError:
@@ -369,15 +485,44 @@ class RemoteConfig:
 
         return cls(
             name=name,
-            priority=data.get("priority", 1),
-            branches=data.get("branches", ["*"]),
+            priority=data.get("priority", DEFAULT_REMOTE_PRIORITY),
+            branches=data.get("branches", DEFAULT_REMOTE_BRANCHES.copy()),
             force_push=force_push,
-            retry=data.get("retry", 3),
-            timeout=data.get("timeout", 30),
-            group=data.get("group", "default"),
+            retry=data.get("retry", DEFAULT_REMOTE_RETRY),
+            timeout=data.get("timeout", DEFAULT_REMOTE_TIMEOUT),
+            group=data.get("group", DEFAULT_REMOTE_GROUP),
             url=data.get("url"),
             vpn=vpn_name,
         )
+
+    @classmethod
+    def from_url(cls, name: str, url: str) -> RemoteConfig:
+        """Create with smart defaults based on URL analysis."""
+        config = cls(name=name, url=url)
+
+        # Detect known hosting providers
+        for host_pattern, host_config in KNOWN_HOSTS.items():
+            if host_pattern in url:
+                config.timeout = host_config.get("timeout", DEFAULT_REMOTE_TIMEOUT)
+                config.retry = host_config.get("retry", DEFAULT_REMOTE_RETRY)
+                force_push_str = host_config.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
+                config.force_push = ForcePushPolicy(force_push_str)
+                break
+
+        # Detect backup remotes - give them higher retry counts
+        for pattern in BACKUP_REMOTE_PATTERNS:
+            if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                config.retry = max(config.retry, 5)  # At least 5 retries for backups
+                config.group = "backup"
+                break
+
+        # Give origin highest priority
+        if name == "origin":
+            config.priority = 1
+        elif name == "upstream":
+            config.priority = 2
+
+        return config
 
 
 @dataclass
@@ -387,16 +532,25 @@ class SyncConfig:
     remotes: dict[str, RemoteConfig] = field(default_factory=dict)
     vpn_configs: dict[str, VpnConfig] = field(default_factory=dict)
     sync_targets: dict[str, FilesystemTarget | RsyncTarget] = field(default_factory=dict)
-    parallel: bool = True
-    max_workers: int = 4
-    offline_queue: bool = True
-    health_check_timeout: int = 5
-    retry_base_delay: float = 1.0
-    retry_max_delay: float = 30.0
-    auto_fetch: bool = True
+    parallel: bool = DEFAULT_PARALLEL
+    max_workers: int = DEFAULT_MAX_WORKERS
+    offline_queue: bool = DEFAULT_OFFLINE_QUEUE
+    health_check_timeout: int = DEFAULT_HEALTH_CHECK_TIMEOUT
+    retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY
+    retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY
+    auto_fetch: bool = DEFAULT_AUTO_FETCH
+    fetch_prune: bool = DEFAULT_FETCH_PRUNE
+    push_tags: bool = DEFAULT_PUSH_TAGS
+    queue_max_retries: int = DEFAULT_QUEUE_MAX_RETRIES
+    queue_max_age_days: int = DEFAULT_QUEUE_MAX_AGE_DAYS
     dry_run: bool = False
     verbose: bool = False
     quiet: bool = False
+    binaries: dict[str, str] = field(default_factory=lambda: {
+        "git": "git",
+        "rsync": "rsync",
+        "ssh": "ssh",
+    })
 
     @classmethod
     def from_dict(cls, data: ConfigDict) -> SyncConfig:
@@ -428,17 +582,27 @@ class SyncConfig:
                 # It's a filesystem target
                 sync_targets[name] = FilesystemTarget.from_dict(name, target_data)  # type: ignore
 
+        # Parse custom binary paths
+        default_binaries = {"git": "git", "rsync": "rsync", "ssh": "ssh"}
+        binaries = default_binaries.copy()
+        binaries.update(data.get("binaries", {}))
+
         return cls(
             remotes=remotes,
             vpn_configs=vpn_configs,
             sync_targets=sync_targets,
-            parallel=data.get("parallel", True),
-            max_workers=data.get("max_workers", 4),
-            offline_queue=data.get("offline_queue", True),
-            health_check_timeout=data.get("health_check_timeout", 5),
-            retry_base_delay=data.get("retry_base_delay", 1.0),
-            retry_max_delay=data.get("retry_max_delay", 30.0),
-            auto_fetch=data.get("auto_fetch", True),
+            parallel=data.get("parallel", DEFAULT_PARALLEL),
+            max_workers=data.get("max_workers", DEFAULT_MAX_WORKERS),
+            offline_queue=data.get("offline_queue", DEFAULT_OFFLINE_QUEUE),
+            health_check_timeout=data.get("health_check_timeout", DEFAULT_HEALTH_CHECK_TIMEOUT),
+            retry_base_delay=data.get("retry_base_delay", DEFAULT_RETRY_BASE_DELAY),
+            retry_max_delay=data.get("retry_max_delay", DEFAULT_RETRY_MAX_DELAY),
+            auto_fetch=data.get("auto_fetch", DEFAULT_AUTO_FETCH),
+            fetch_prune=data.get("fetch_prune", DEFAULT_FETCH_PRUNE),
+            push_tags=data.get("push_tags", DEFAULT_PUSH_TAGS),
+            queue_max_retries=data.get("queue_max_retries", DEFAULT_QUEUE_MAX_RETRIES),
+            queue_max_age_days=data.get("queue_max_age_days", DEFAULT_QUEUE_MAX_AGE_DAYS),
+            binaries=binaries,
         )
 
 
@@ -653,6 +817,36 @@ class Logger:
 # Global logger instance
 logger = Logger()
 
+# Global config instance (set during initialization)
+_global_config: SyncConfig | None = None
+
+
+def set_global_config(config: SyncConfig) -> None:
+    """Set the global config instance."""
+    global _global_config
+    _global_config = config
+
+
+def get_git_binary() -> str:
+    """Get the git binary path from config."""
+    if _global_config and "git" in _global_config.binaries:
+        return _global_config.binaries["git"]
+    return "git"
+
+
+def get_rsync_binary() -> str:
+    """Get the rsync binary path from config."""
+    if _global_config and "rsync" in _global_config.binaries:
+        return _global_config.binaries["rsync"]
+    return "rsync"
+
+
+def get_ssh_binary() -> str:
+    """Get the ssh binary path from config."""
+    if _global_config and "ssh" in _global_config.binaries:
+        return _global_config.binaries["ssh"]
+    return "ssh"
+
 
 def run_git_command(
     args: list[str],
@@ -660,7 +854,7 @@ def run_git_command(
     capture_output: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
-    cmd = ["git"] + args
+    cmd = [get_git_binary()] + args
     try:
         result = subprocess.run(
             cmd,
@@ -857,7 +1051,12 @@ def merge_configs(*configs: ConfigDict) -> ConfigDict:
 
 
 def discover_remotes(config: SyncConfig) -> SyncConfig:
-    """Auto-discover remotes if none configured."""
+    """Auto-discover remotes if none configured.
+
+    Uses smart defaults based on:
+    - Remote name (origin, upstream, backup-*, etc.)
+    - Remote URL (GitHub, GitLab, Bitbucket, etc.)
+    """
     if config.remotes:
         return config
 
@@ -866,18 +1065,35 @@ def discover_remotes(config: SyncConfig) -> SyncConfig:
     if not git_remotes:
         return config
 
-    # Create default configuration for each remote
+    # Create smart configuration for each remote
     for i, remote in enumerate(git_remotes):
         url = get_remote_url(remote)
-        # Give origin highest priority
-        priority = 1 if remote == "origin" else i + 2
-        config.remotes[remote] = RemoteConfig(
-            name=remote,
-            priority=priority,
-            branches=["*"],
-            force_push=ForcePushPolicy.BLOCK,
-            url=url,
-        )
+
+        if url:
+            # Use smart defaults based on URL analysis
+            remote_config = RemoteConfig.from_url(remote, url)
+        else:
+            # Basic config if we can't get the URL
+            remote_config = RemoteConfig(name=remote)
+
+        # Set priority based on remote name and position
+        if remote == "origin":
+            remote_config.priority = 1
+        elif remote == "upstream":
+            remote_config.priority = 2
+        else:
+            # Other remotes get lower priority
+            remote_config.priority = i + 10
+
+        config.remotes[remote] = remote_config
+
+        if config.verbose:
+            host_info = ""
+            for host_pattern, host_data in KNOWN_HOSTS.items():
+                if url and host_pattern in url:
+                    host_info = f" ({host_data['name']})"
+                    break
+            logger.debug(f"Discovered remote: {remote}{host_info}")
 
     return config
 
@@ -1190,7 +1406,7 @@ def get_current_branch(repo_path: Path | None = None) -> str | None:
         result = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
     else:
         result = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            [get_git_binary(), "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1224,9 +1440,11 @@ def switch_branch_at_path(
     if dry_run:
         return True, f"[DRY RUN] Would switch to branch '{branch}' at {repo_path}"
 
+    git_bin = get_git_binary()
+
     # First, try to checkout the branch
     result = subprocess.run(
-        ["git", "-C", str(repo_path), "checkout", branch],
+        [git_bin, "-C", str(repo_path), "checkout", branch],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1241,7 +1459,7 @@ def switch_branch_at_path(
     if "did not match any file" in result.stderr or "pathspec" in result.stderr:
         # Try to create tracking branch from origin
         fetch_result = subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "--all"],
+            [git_bin, "-C", str(repo_path), "fetch", "--all"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -1250,7 +1468,7 @@ def switch_branch_at_path(
 
         # Try checkout again after fetch
         result = subprocess.run(
-            ["git", "-C", str(repo_path), "checkout", branch],
+            [git_bin, "-C", str(repo_path), "checkout", branch],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1262,7 +1480,7 @@ def switch_branch_at_path(
 
         # Try creating a new tracking branch
         result = subprocess.run(
-            ["git", "-C", str(repo_path), "checkout", "-b", branch, f"origin/{branch}"],
+            [git_bin, "-C", str(repo_path), "checkout", "-b", branch, f"origin/{branch}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1288,7 +1506,7 @@ def switch_branch_via_ssh(
         return True, f"[DRY RUN] Would switch to branch '{branch}' at {target.get_rsync_destination()}"
 
     # Build SSH command
-    ssh_cmd = ["ssh"]
+    ssh_cmd = [get_ssh_binary()]
     if target.port != 22:
         ssh_cmd.extend(["-p", str(target.port)])
     if target.ssh_key:
@@ -1402,7 +1620,7 @@ def sync_to_filesystem(
         )
 
     # Build rsync command for local sync
-    rsync_cmd = ["rsync", "-av", "--progress"]
+    rsync_cmd = [get_rsync_binary(), "-av", "--progress"]
 
     # Add delete flag if requested
     if target.delete:
@@ -1543,10 +1761,10 @@ def sync_to_rsync(
         )
 
     # Build rsync command
-    rsync_cmd = ["rsync", "-avz", "--progress"]
+    rsync_cmd = [get_rsync_binary(), "-avz", "--progress"]
 
     # Build SSH command with options
-    ssh_cmd_parts = ["ssh"]
+    ssh_cmd_parts = [get_ssh_binary()]
     if target.port != 22:
         ssh_cmd_parts.extend(["-p", str(target.port)])
     if target.ssh_key:
@@ -1654,7 +1872,7 @@ def check_rsync_target_health(target: RsyncTarget, timeout: int = 10) -> HealthC
     start_time = time.time()
 
     # Build SSH command to test connectivity
-    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+    ssh_cmd = [get_ssh_binary(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 
     if target.port != 22:
         ssh_cmd.extend(["-p", str(target.port)])
@@ -2489,6 +2707,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_parallel:
         config.parallel = False
+
+    # Set global config for binary paths
+    set_global_config(config)
 
     # Auto-discover remotes if none configured
     config = discover_remotes(config)

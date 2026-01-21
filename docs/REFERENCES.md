@@ -1,0 +1,1 @@
+https://github.com/codefuturist/pre-commit-tidy

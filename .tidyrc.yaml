@@ -1,0 +1,17 @@
+source_dir: "."
+target_dir: "docs"
+extensions:
+  - ".md"
+exclude_files:
+  - "readme.md"
+  - "changelog.md"
+  - "contributing.md"
+  - "license.md"
+exclude_dirs:
+  - "docs"
+  - ".git"
+  - ".github"
+  - "tests"
+  - "testing"
+  - "pre_commit"
+recursive: false

@@ -8,7 +8,7 @@ Usage:
     binary-track [options]
 
 Options:
-    --config PATH       Path to configuration file (default: .binariesrc.json)
+    --config PATH       Path to configuration file (default: .binariesrc.yaml)
     --status            Show status of all tracked binaries
     --check             Check for stale binaries (exit 1 if any stale)
     --rebuild           Rebuild all stale binaries
@@ -28,7 +28,7 @@ Options:
     --version           Show version number
 
 Configuration:
-    Create a .binariesrc.json file in your project root:
+    Create a .binariesrc.yaml file in your project root:
 
     {
         "binaries": {
@@ -110,6 +110,51 @@ Configuration:
     - "options": codesign options like ["runtime"] for hardened runtime
     - "force": Replace existing signatures (default: true)
 
+    Executable Permissions:
+    - "ensure_executable": Automatically set executable permissions after build
+      (default: true for CLI binaries, skipped for .app bundles)
+
+    Test Commands:
+    - "test_cmd": Command to run after successful build to verify the binary
+    - "test_timeout": Timeout for test command in seconds (default: 60)
+    - Tests run after build succeeds; test failure marks build as TEST_FAILED
+
+    Retry & Recovery:
+    - "retry_count": Number of times to retry failed builds (default: 0)
+    - "retry_delay_seconds": Delay between retries (default: 1.0)
+    - Failed builds are recorded in manifest for tracking failure history
+
+    Service Management:
+    - For binaries running as system services (daemons, background agents)
+    - Automatically stops service before rebuild and restarts after
+    - Supports launchd (macOS), systemd (Linux), and custom commands
+
+    Service Configuration:
+    {
+        "service": {
+            "enabled": true,
+            "type": "launchd",           // "launchd", "systemd", or "custom"
+            "name": "com.example.mydaemon",  // Service identifier
+            "restart_after_build": true,  // Auto-restart after successful build
+            "stop_timeout_seconds": 30,   // Wait time for graceful shutdown
+            "start_timeout_seconds": 10,  // Wait time for service to start
+            "stop_cmd": null,             // Custom stop command (for type: custom)
+            "start_cmd": null,            // Custom start command (for type: custom)
+            "status_cmd": null            // Custom status command (for type: custom)
+        }
+    }
+
+    Custom Binary Paths:
+    - Override paths to git and codesign binaries
+    - Useful when binaries are in non-standard locations
+    - Configure in "system_binaries" section:
+    {
+        "system_binaries": {
+            "git": "/usr/local/bin/git",
+            "codesign": "/usr/bin/codesign"
+        }
+    }
+
 Environment Variables:
     BINARY_TRACK_DRY_RUN       Set to 'true' for dry run
     BINARY_TRACK_VERBOSE       Set to 'true' for verbose output
@@ -128,6 +173,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -139,11 +185,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypedDict
 
+import yaml
+
 # Version
 __version__ = "1.0.0"
 
 # Default configuration file names
-CONFIG_FILE_NAMES = [".binariesrc.json", ".binariesrc", "binaries.config.json"]
+CONFIG_FILE_NAMES = [".binariesrc.yaml", ".binariesrc.yml", "binaries.config.yaml"]
 
 # Manifest file for tracking build state
 BUILD_MANIFEST_FILE = ".binary-track-manifest.json"
@@ -683,8 +731,42 @@ class RebuildStatus(Enum):
 
     SUCCESS = "success"
     FAILED = "failed"
+    TEST_FAILED = "test_failed"  # Build succeeded but tests failed
     SKIPPED = "skipped"
     DRY_RUN = "dry_run"
+
+
+class BuildFailureReason(Enum):
+    """Categorized reason for build failure."""
+
+    COMMAND_NOT_FOUND = "command_not_found"
+    COMPILATION_ERROR = "compilation_error"
+    LINKER_ERROR = "linker_error"
+    TIMEOUT = "timeout"
+    PERMISSION_DENIED = "permission_denied"
+    MISSING_DEPENDENCY = "missing_dependency"
+    TEST_FAILED = "test_failed"
+    SERVICE_STOP_FAILED = "service_stop_failed"
+    SERVICE_START_FAILED = "service_start_failed"
+    UNKNOWN = "unknown"
+
+
+class ServiceType(Enum):
+    """Type of service manager."""
+
+    LAUNCHD = "launchd"    # macOS launchd
+    SYSTEMD = "systemd"    # Linux systemd
+    CUSTOM = "custom"      # Custom stop/start commands
+    NONE = "none"          # Not a service
+
+
+class ServiceStatus(Enum):
+    """Status of a service."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    NOT_FOUND = "not_found"
+    UNKNOWN = "unknown"
 
 
 class CodesignStatus(Enum):
@@ -709,6 +791,20 @@ class CodesignConfigDict(TypedDict, total=False):
     force: bool
 
 
+class ServiceConfigDict(TypedDict, total=False):
+    """Type definition for service configuration."""
+
+    enabled: bool
+    type: str  # "launchd", "systemd", or "custom"
+    name: str  # Service identifier (launchd label, systemd unit name)
+    restart_after_build: bool
+    stop_timeout_seconds: int
+    start_timeout_seconds: int
+    stop_cmd: str | None  # Custom stop command
+    start_cmd: str | None  # Custom start command
+    status_cmd: str | None  # Custom status check command
+
+
 class BinaryConfigDict(TypedDict, total=False):
     """Type definition for binary configuration."""
 
@@ -724,6 +820,12 @@ class BinaryConfigDict(TypedDict, total=False):
     env: dict[str, str]
     timeout: int
     codesign: CodesignConfigDict
+    service: ServiceConfigDict  # Service management configuration
+    ensure_executable: bool  # Set executable permissions after build
+    test_cmd: str  # Command to run after build to verify binary
+    test_timeout: int  # Timeout for test command
+    retry_count: int  # Number of retries on build failure
+    retry_delay_seconds: float  # Delay between retries
 
 
 class ConfigDict(TypedDict, total=False):
@@ -739,6 +841,7 @@ class ConfigDict(TypedDict, total=False):
     parallel_builds: bool
     max_workers: int
     codesign: CodesignConfigDict
+    ensure_executable: bool  # Global default for setting executable permissions
 
 
 @dataclass
@@ -776,6 +879,46 @@ class CodesignConfig:
 
 
 @dataclass
+class ServiceConfig:
+    """Configuration for service management."""
+
+    enabled: bool = False
+    service_type: ServiceType = ServiceType.NONE
+    name: str = ""  # Service identifier (launchd label, systemd unit)
+    restart_after_build: bool = True
+    stop_timeout_seconds: int = 30
+    start_timeout_seconds: int = 10
+    stop_cmd: str | None = None  # Custom stop command
+    start_cmd: str | None = None  # Custom start command
+    status_cmd: str | None = None  # Custom status check command
+
+    @classmethod
+    def from_dict(cls, data: ServiceConfigDict | None) -> ServiceConfig:
+        """Create from dictionary."""
+        if not data:
+            return cls()
+
+        # Parse service type
+        service_type_str = data.get("type", "none")
+        try:
+            service_type = ServiceType(service_type_str)
+        except ValueError:
+            service_type = ServiceType.NONE
+
+        return cls(
+            enabled=data.get("enabled", False),
+            service_type=service_type,
+            name=data.get("name", ""),
+            restart_after_build=data.get("restart_after_build", True),
+            stop_timeout_seconds=data.get("stop_timeout_seconds", 30),
+            start_timeout_seconds=data.get("start_timeout_seconds", 10),
+            stop_cmd=data.get("stop_cmd"),
+            start_cmd=data.get("start_cmd"),
+            status_cmd=data.get("status_cmd"),
+        )
+
+
+@dataclass
 class BinaryConfig:
     """Configuration for a single tracked binary."""
 
@@ -792,9 +935,15 @@ class BinaryConfig:
     env: dict[str, str] = field(default_factory=dict)
     timeout: int = 300  # 5 minutes default
     codesign: CodesignConfig = field(default_factory=CodesignConfig)
+    service: ServiceConfig = field(default_factory=ServiceConfig)
+    ensure_executable: bool = True  # Set executable permissions after build
+    test_cmd: str = ""  # Command to run after build to verify binary
+    test_timeout: int = 60  # Timeout for test command in seconds
+    retry_count: int = 0  # Number of retries on build failure
+    retry_delay_seconds: float = 1.0  # Delay between retries
 
     @classmethod
-    def from_dict(cls, name: str, data: BinaryConfigDict) -> BinaryConfig:
+    def from_dict(cls, name: str, data: BinaryConfigDict, global_ensure_executable: bool = True) -> BinaryConfig:
         """Create from dictionary."""
         # Parse binary type
         binary_type_str = data.get("binary_type", "cli")
@@ -830,6 +979,12 @@ class BinaryConfig:
             env=data.get("env", {}),
             timeout=data.get("timeout", 300),
             codesign=CodesignConfig.from_dict(data.get("codesign")),
+            service=ServiceConfig.from_dict(data.get("service")),
+            ensure_executable=data.get("ensure_executable", global_ensure_executable),
+            test_cmd=data.get("test_cmd", ""),
+            test_timeout=data.get("test_timeout", 60),
+            retry_count=data.get("retry_count", 0),
+            retry_delay_seconds=data.get("retry_delay_seconds", 1.0),
         )
 
     def get_expanded_install_path(self) -> Path:
@@ -864,6 +1019,7 @@ class TrackConfig:
     quiet: bool = False
     json_output: bool = False
     codesign: CodesignConfig = field(default_factory=CodesignConfig)
+    ensure_executable: bool = True  # Global default for setting executable permissions
 
     @classmethod
     def from_dict(cls, data: ConfigDict, root_dir: Path | None = None) -> TrackConfig:
@@ -871,9 +1027,12 @@ class TrackConfig:
         # Parse global codesign config first
         global_codesign = CodesignConfig.from_dict(data.get("codesign"))
 
+        # Parse global ensure_executable setting (default: True)
+        global_ensure_executable = data.get("ensure_executable", True)
+
         binaries = {}
         for name, binary_data in data.get("binaries", {}).items():
-            binary = BinaryConfig.from_dict(name, binary_data)
+            binary = BinaryConfig.from_dict(name, binary_data, global_ensure_executable)
             # Merge per-binary codesign with global config
             binary.codesign = binary.codesign.merge_with(global_codesign)
             binaries[name] = binary
@@ -909,6 +1068,7 @@ class TrackConfig:
             parallel_builds=data.get("parallel_builds", True),
             max_workers=data.get("max_workers", 4),
             codesign=global_codesign,
+            ensure_executable=global_ensure_executable,
         )
 
         if root_dir:
@@ -1031,6 +1191,30 @@ class RebuildResult:
     duration: float = 0.0
     message: str = ""
     output: str = ""
+    # Enhanced failure tracking
+    failure_reason: BuildFailureReason | None = None
+    exit_code: int | None = None
+    test_output: str = ""
+    test_duration: float = 0.0
+    suggestion: str = ""  # Actionable hint for the user
+    retry_attempt: int = 0  # Which attempt this was (0 = first try)
+    # Service management tracking
+    service_stopped: bool = False
+    service_started: bool = False
+    service_status: ServiceStatus = ServiceStatus.UNKNOWN
+
+
+@dataclass
+class ServiceResult:
+    """Result of a service operation."""
+
+    name: str
+    service_type: ServiceType
+    status: ServiceStatus
+    operation: str = ""  # "stop", "start", "status"
+    success: bool = False
+    message: str = ""
+    duration: float = 0.0
 
 
 @dataclass
@@ -1202,7 +1386,7 @@ class Logger:
 
 
 def load_config_file(config_path: Path | None = None, root_dir: Path | None = None) -> ConfigDict:
-    """Load configuration from file."""
+    """Load configuration from YAML file."""
     if root_dir is None:
         root_dir = Path.cwd()
 
@@ -1211,7 +1395,7 @@ def load_config_file(config_path: Path | None = None, root_dir: Path | None = No
         full_path = root_dir / config_path
         if full_path.exists():
             with open(full_path, encoding="utf-8") as f:
-                data: ConfigDict = json.load(f)
+                data: ConfigDict = yaml.safe_load(f) or {}
                 return data
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -1220,7 +1404,7 @@ def load_config_file(config_path: Path | None = None, root_dir: Path | None = No
         full_path = root_dir / filename
         if full_path.exists():
             with open(full_path, encoding="utf-8") as f:
-                data = json.load(f)
+                data = yaml.safe_load(f) or {}
                 return data
 
     return {}
@@ -1256,7 +1440,7 @@ def save_manifest(manifest: BuildManifest, root_dir: Path) -> None:
 
     manifest_path = root_dir / BUILD_MANIFEST_FILE
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest.to_dict(), f, indent=2)
+        yaml.dump(manifest.to_dict(), f, default_flow_style=False, sort_keys=False)
 
 
 def load_manifest(root_dir: Path) -> BuildManifest:
@@ -1267,9 +1451,9 @@ def load_manifest(root_dir: Path) -> BuildManifest:
 
     try:
         with open(manifest_path, encoding="utf-8") as f:
-            data = json.load(f)
+            data = yaml.safe_load(f) or {}
         return BuildManifest.from_dict(data)
-    except (json.JSONDecodeError, KeyError):
+    except (yaml.YAMLError, KeyError):
         return BuildManifest()
 
 
@@ -1569,95 +1753,878 @@ def get_binary_status(
     return result
 
 
+def ensure_binary_executable(
+    binary_path: Path,
+    logger: Logger,
+    dry_run: bool = False,
+) -> bool:
+    """Ensure a binary file has executable permissions.
+
+    Sets the executable bit for user, group, and others while preserving
+    existing read/write permissions. Skips directories (e.g., .app bundles)
+    and files that are already executable.
+
+    Args:
+        binary_path: Path to the binary file
+        logger: Logger instance for output
+        dry_run: If True, only log what would be done
+
+    Returns:
+        True if the file is now executable (or was already), False on failure
+    """
+    # Skip directories (e.g., macOS .app bundles)
+    if not binary_path.exists():
+        logger.debug(f"Cannot set executable: {binary_path} does not exist")
+        return False
+
+    if binary_path.is_dir():
+        logger.debug(f"Skipping directory: {binary_path}")
+        return True  # .app bundles handle permissions internally
+
+    # Check if already executable
+    if os.access(binary_path, os.X_OK):
+        logger.debug(f"Already executable: {binary_path}")
+        return True
+
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would set executable permissions: {binary_path}")
+        return True
+
+    try:
+        current_mode = binary_path.stat().st_mode
+        # Add execute permission for user, group, and others
+        new_mode = current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        binary_path.chmod(new_mode)
+        logger.debug(f"Set executable permissions on {binary_path}")
+        return True
+    except PermissionError as e:
+        logger.warn(f"Could not set executable permissions on {binary_path}: {e}")
+        return False
+    except OSError as e:
+        logger.warn(f"Error setting permissions on {binary_path}: {e}")
+        return False
+
+
+# =============================================================================
+# Service Management Functions
+# =============================================================================
+
+
+def get_service_status(
+    service_config: ServiceConfig,
+    logger: Logger,
+) -> ServiceResult:
+    """Check the current status of a service.
+
+    Args:
+        service_config: Service configuration
+        logger: Logger instance
+
+    Returns:
+        ServiceResult with current status
+    """
+    result = ServiceResult(
+        name=service_config.name,
+        service_type=service_config.service_type,
+        status=ServiceStatus.UNKNOWN,
+        operation="status",
+    )
+
+    if not service_config.enabled or not service_config.name:
+        result.status = ServiceStatus.UNKNOWN
+        result.message = "Service not configured"
+        return result
+
+    start_time = time.time()
+
+    try:
+        if service_config.service_type == ServiceType.LAUNCHD:
+            # macOS launchd
+            proc = subprocess.run(
+                ["launchctl", "list", service_config.name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            result.duration = time.time() - start_time
+
+            if proc.returncode == 0:
+                result.status = ServiceStatus.RUNNING
+                result.success = True
+                result.message = "Service is running"
+            else:
+                # Check if it's not found vs stopped
+                if "could not find service" in proc.stderr.lower():
+                    result.status = ServiceStatus.NOT_FOUND
+                    result.message = f"Service '{service_config.name}' not found"
+                else:
+                    result.status = ServiceStatus.STOPPED
+                    result.message = "Service is stopped"
+
+        elif service_config.service_type == ServiceType.SYSTEMD:
+            # Linux systemd
+            proc = subprocess.run(
+                ["systemctl", "is-active", service_config.name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            result.duration = time.time() - start_time
+
+            status_output = proc.stdout.strip().lower()
+            if status_output == "active":
+                result.status = ServiceStatus.RUNNING
+                result.success = True
+                result.message = "Service is running"
+            elif status_output in ("inactive", "dead"):
+                result.status = ServiceStatus.STOPPED
+                result.message = "Service is stopped"
+            elif "could not be found" in proc.stderr.lower():
+                result.status = ServiceStatus.NOT_FOUND
+                result.message = f"Service '{service_config.name}' not found"
+            else:
+                result.status = ServiceStatus.UNKNOWN
+                result.message = f"Unknown status: {status_output}"
+
+        elif service_config.service_type == ServiceType.CUSTOM:
+            # Custom status command
+            if service_config.status_cmd:
+                proc = subprocess.run(
+                    service_config.status_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                result.duration = time.time() - start_time
+
+                if proc.returncode == 0:
+                    result.status = ServiceStatus.RUNNING
+                    result.success = True
+                    result.message = "Service is running"
+                else:
+                    result.status = ServiceStatus.STOPPED
+                    result.message = "Service is stopped"
+            else:
+                result.status = ServiceStatus.UNKNOWN
+                result.message = "No status command configured"
+
+        else:
+            result.status = ServiceStatus.UNKNOWN
+            result.message = "Unknown service type"
+
+    except subprocess.TimeoutExpired:
+        result.duration = time.time() - start_time
+        result.status = ServiceStatus.UNKNOWN
+        result.message = "Status check timed out"
+
+    except FileNotFoundError as e:
+        result.duration = time.time() - start_time
+        result.status = ServiceStatus.UNKNOWN
+        result.message = f"Service manager not found: {e}"
+
+    except Exception as e:
+        result.duration = time.time() - start_time
+        result.status = ServiceStatus.UNKNOWN
+        result.message = f"Error checking status: {e}"
+
+    return result
+
+
+def stop_service(
+    service_config: ServiceConfig,
+    logger: Logger,
+    dry_run: bool = False,
+) -> ServiceResult:
+    """Stop a running service.
+
+    Args:
+        service_config: Service configuration
+        logger: Logger instance
+        dry_run: If True, only log what would be done
+
+    Returns:
+        ServiceResult indicating success/failure
+    """
+    result = ServiceResult(
+        name=service_config.name,
+        service_type=service_config.service_type,
+        status=ServiceStatus.UNKNOWN,
+        operation="stop",
+    )
+
+    if not service_config.enabled or not service_config.name:
+        result.success = True
+        result.message = "Service not configured, skipping"
+        return result
+
+    logger.info(f"Stopping service '{service_config.name}'...")
+
+    if dry_run:
+        result.success = True
+        result.message = f"[DRY-RUN] Would stop service '{service_config.name}'"
+        logger.info(result.message)
+        return result
+
+    start_time = time.time()
+
+    try:
+        cmd: list[str] | str
+
+        if service_config.service_type == ServiceType.LAUNCHD:
+            # macOS: launchctl stop
+            cmd = ["launchctl", "stop", service_config.name]
+        elif service_config.service_type == ServiceType.SYSTEMD:
+            # Linux: systemctl stop
+            cmd = ["systemctl", "stop", service_config.name]
+        elif service_config.service_type == ServiceType.CUSTOM:
+            if service_config.stop_cmd:
+                cmd = service_config.stop_cmd
+            else:
+                result.success = False
+                result.message = "No stop command configured"
+                logger.error(result.message)
+                return result
+        else:
+            result.success = False
+            result.message = "Unknown service type"
+            return result
+
+        # Execute stop command
+        if isinstance(cmd, list):
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=service_config.stop_timeout_seconds,
+            )
+        else:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=service_config.stop_timeout_seconds,
+            )
+
+        result.duration = time.time() - start_time
+
+        if proc.returncode == 0:
+            result.success = True
+            result.status = ServiceStatus.STOPPED
+            result.message = f"Service stopped in {result.duration:.1f}s"
+            logger.success(result.message)
+        else:
+            result.success = False
+            result.message = f"Failed to stop service: {proc.stderr or proc.stdout}"
+            logger.error(result.message)
+
+    except subprocess.TimeoutExpired:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Stop timed out after {service_config.stop_timeout_seconds}s"
+        logger.error(result.message)
+
+    except FileNotFoundError as e:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Service manager not found: {e}"
+        logger.error(result.message)
+
+    except Exception as e:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Error stopping service: {e}"
+        logger.error(result.message)
+
+    return result
+
+
+def start_service(
+    service_config: ServiceConfig,
+    logger: Logger,
+    dry_run: bool = False,
+) -> ServiceResult:
+    """Start a service.
+
+    Args:
+        service_config: Service configuration
+        logger: Logger instance
+        dry_run: If True, only log what would be done
+
+    Returns:
+        ServiceResult indicating success/failure
+    """
+    result = ServiceResult(
+        name=service_config.name,
+        service_type=service_config.service_type,
+        status=ServiceStatus.UNKNOWN,
+        operation="start",
+    )
+
+    if not service_config.enabled or not service_config.name:
+        result.success = True
+        result.message = "Service not configured, skipping"
+        return result
+
+    logger.info(f"Starting service '{service_config.name}'...")
+
+    if dry_run:
+        result.success = True
+        result.message = f"[DRY-RUN] Would start service '{service_config.name}'"
+        logger.info(result.message)
+        return result
+
+    start_time = time.time()
+
+    try:
+        cmd: list[str] | str
+
+        if service_config.service_type == ServiceType.LAUNCHD:
+            # macOS: launchctl start
+            cmd = ["launchctl", "start", service_config.name]
+        elif service_config.service_type == ServiceType.SYSTEMD:
+            # Linux: systemctl start
+            cmd = ["systemctl", "start", service_config.name]
+        elif service_config.service_type == ServiceType.CUSTOM:
+            if service_config.start_cmd:
+                cmd = service_config.start_cmd
+            else:
+                result.success = False
+                result.message = "No start command configured"
+                logger.error(result.message)
+                return result
+        else:
+            result.success = False
+            result.message = "Unknown service type"
+            return result
+
+        # Execute start command
+        if isinstance(cmd, list):
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=service_config.start_timeout_seconds,
+            )
+        else:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=service_config.start_timeout_seconds,
+            )
+
+        result.duration = time.time() - start_time
+
+        if proc.returncode == 0:
+            # Give service a moment to start, then verify
+            time.sleep(0.5)
+            status = get_service_status(service_config, logger)
+
+            if status.status == ServiceStatus.RUNNING:
+                result.success = True
+                result.status = ServiceStatus.RUNNING
+                result.message = f"Service started in {result.duration:.1f}s"
+                logger.success(result.message)
+            else:
+                result.success = False
+                result.status = status.status
+                result.message = f"Service started but not running: {status.message}"
+                logger.warn(result.message)
+        else:
+            result.success = False
+            result.message = f"Failed to start service: {proc.stderr or proc.stdout}"
+            logger.error(result.message)
+
+    except subprocess.TimeoutExpired:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Start timed out after {service_config.start_timeout_seconds}s"
+        logger.error(result.message)
+
+    except FileNotFoundError as e:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Service manager not found: {e}"
+        logger.error(result.message)
+
+    except Exception as e:
+        result.duration = time.time() - start_time
+        result.success = False
+        result.message = f"Error starting service: {e}"
+        logger.error(result.message)
+
+    return result
+
+
+def restart_service(
+    service_config: ServiceConfig,
+    logger: Logger,
+    dry_run: bool = False,
+) -> ServiceResult:
+    """Restart a service (stop then start).
+
+    Args:
+        service_config: Service configuration
+        logger: Logger instance
+        dry_run: If True, only log what would be done
+
+    Returns:
+        ServiceResult indicating success/failure
+    """
+    result = ServiceResult(
+        name=service_config.name,
+        service_type=service_config.service_type,
+        status=ServiceStatus.UNKNOWN,
+        operation="restart",
+    )
+
+    if not service_config.enabled or not service_config.name:
+        result.success = True
+        result.message = "Service not configured, skipping"
+        return result
+
+    # Stop the service
+    stop_result = stop_service(service_config, logger, dry_run)
+    if not stop_result.success:
+        result.success = False
+        result.message = f"Failed to stop: {stop_result.message}"
+        return result
+
+    # Small delay between stop and start
+    if not dry_run:
+        time.sleep(0.5)
+
+    # Start the service
+    start_result = start_service(service_config, logger, dry_run)
+    result.success = start_result.success
+    result.status = start_result.status
+    result.duration = stop_result.duration + start_result.duration
+    result.message = start_result.message
+
+    return result
+
+
+def _get_stop_command_hint(service_config: ServiceConfig) -> str:
+    """Get a hint for how to manually stop the service."""
+    if service_config.service_type == ServiceType.LAUNCHD:
+        return f"launchctl stop {service_config.name}"
+    elif service_config.service_type == ServiceType.SYSTEMD:
+        return f"sudo systemctl stop {service_config.name}"
+    elif service_config.service_type == ServiceType.CUSTOM and service_config.stop_cmd:
+        return service_config.stop_cmd
+    return f"stop service '{service_config.name}'"
+
+
+def _get_start_command_hint(service_config: ServiceConfig) -> str:
+    """Get a hint for how to manually start the service."""
+    if service_config.service_type == ServiceType.LAUNCHD:
+        return f"launchctl start {service_config.name}"
+    elif service_config.service_type == ServiceType.SYSTEMD:
+        return f"sudo systemctl start {service_config.name}"
+    elif service_config.service_type == ServiceType.CUSTOM and service_config.start_cmd:
+        return service_config.start_cmd
+    return f"start service '{service_config.name}'"
+
+
+def categorize_build_failure(
+    exit_code: int,
+    stderr: str,
+    stdout: str,
+    language: str,
+) -> tuple[BuildFailureReason, str]:
+    """Analyze build failure output and return categorized reason with suggestion.
+
+    Args:
+        exit_code: The process exit code
+        stderr: Standard error output
+        stdout: Standard output
+        language: The programming language (go, rust, swift, etc.)
+
+    Returns:
+        Tuple of (BuildFailureReason, actionable suggestion string)
+    """
+    output = (stderr + stdout).lower()
+
+    # Command not found (highest priority - tool isn't even installed)
+    if "command not found" in output or "not recognized" in output:
+        tool = language or "build"
+        return (
+            BuildFailureReason.COMMAND_NOT_FOUND,
+            f"Build tool not found. Ensure {tool} toolchain is installed and in PATH",
+        )
+
+    # Permission denied (system-level issue)
+    if "permission denied" in output:
+        return (
+            BuildFailureReason.PERMISSION_DENIED,
+            "Permission denied. Check file permissions or run with appropriate privileges",
+        )
+
+    # Language-specific compilation errors (check BEFORE generic patterns)
+    if language == "go":
+        if "undefined:" in output or "cannot refer to" in output:
+            return (
+                BuildFailureReason.COMPILATION_ERROR,
+                "Go compilation error. Check for undefined references or import issues",
+            )
+    elif language == "rust":
+        if "error[e" in output:
+            return (
+                BuildFailureReason.COMPILATION_ERROR,
+                "Rust compilation error. Run 'cargo check' for detailed diagnostics",
+            )
+    elif language == "swift":
+        if "error:" in output and "swift" in output:
+            return (
+                BuildFailureReason.COMPILATION_ERROR,
+                "Swift compilation error. Check Xcode build logs for details",
+            )
+    elif language in ("c", "cpp", "c++"):
+        if "undefined reference" in output or "unresolved external" in output:
+            return (
+                BuildFailureReason.LINKER_ERROR,
+                "Linker error. Check library paths and ensure all dependencies are linked",
+            )
+        if "error:" in output:
+            return (
+                BuildFailureReason.COMPILATION_ERROR,
+                "C/C++ compilation error. Check syntax and include paths",
+            )
+
+    # Generic compilation/linker patterns
+    if any(x in output for x in ["syntax error", "parse error", "unexpected token"]):
+        return (
+            BuildFailureReason.COMPILATION_ERROR,
+            "Syntax error in source code. Check the build output for line numbers",
+        )
+
+    if any(x in output for x in ["undefined reference", "unresolved symbol", "linker error"]):
+        return (
+            BuildFailureReason.LINKER_ERROR,
+            "Linker error. Verify library dependencies and link flags",
+        )
+
+    # Missing files/dependencies (check after compilation errors)
+    if any(x in output for x in ["cannot find", "no such file", "not found", "cannot open"]):
+        return (
+            BuildFailureReason.MISSING_DEPENDENCY,
+            "Missing file or dependency. Check that all required files exist and paths are correct",
+        )
+
+    return (
+        BuildFailureReason.UNKNOWN,
+        "Build failed. Check the output above for details",
+    )
+
+
+def run_test_command(
+    binary_config: BinaryConfig,
+    config: TrackConfig,
+    logger: Logger,
+) -> tuple[bool, str, float]:
+    """Run the test command for a binary after successful build.
+
+    Args:
+        binary_config: The binary configuration
+        config: The track configuration
+        logger: Logger instance
+
+    Returns:
+        Tuple of (success, output, duration)
+    """
+    if not binary_config.test_cmd:
+        return True, "", 0.0
+
+    if config.dry_run:
+        logger.info(f"[DRY-RUN] Would run tests: {binary_config.test_cmd}")
+        return True, "", 0.0
+
+    logger.info(f"Running tests for {binary_config.name}...")
+    logger.debug(f"Test command: {binary_config.test_cmd}")
+
+    env = os.environ.copy()
+    env.update(binary_config.env)
+    working_dir = config.root_dir / binary_config.working_dir
+
+    start_time = time.time()
+    try:
+        proc = subprocess.run(
+            binary_config.test_cmd,
+            shell=True,
+            cwd=working_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=binary_config.test_timeout,
+        )
+        duration = time.time() - start_time
+
+        if proc.returncode == 0:
+            logger.success(f"Tests passed in {duration:.1f}s")
+            return True, proc.stdout, duration
+        else:
+            output = proc.stderr or proc.stdout
+            logger.error(f"Tests failed with exit code {proc.returncode}")
+            return False, output, duration
+
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
+        logger.error(f"Tests timed out after {binary_config.test_timeout}s")
+        return False, f"Test timed out after {binary_config.test_timeout}s", duration
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(f"Test error: {e}")
+        return False, str(e), duration
+
+
 def rebuild_binary(
     binary_config: BinaryConfig,
     config: TrackConfig,
     manifest: BuildManifest,
     logger: Logger,
 ) -> RebuildResult:
-    """Rebuild a single binary."""
+    """Rebuild a single binary with retry support and test validation.
+
+    Handles the complete build lifecycle:
+    1. Stop service if binary is a service (with configurable timeout)
+    2. Build the binary (with retries if configured)
+    3. Set executable permissions
+    4. Run tests (if configured)
+    5. Codesign (if enabled)
+    6. Restart service if configured
+    7. Update manifest (success or failure)
+    """
     result = RebuildResult(name=binary_config.name, status=RebuildStatus.SKIPPED)
 
     if not binary_config.build_cmd:
         result.message = "No build command configured"
         return result
 
+    # Handle service-aware builds
+    service_config = binary_config.service
+    service_was_running = False
+
+    if service_config.enabled:
+        # Check if service is running before we stop it
+        status_result = get_service_status(service_config, logger)
+        service_was_running = status_result.status == ServiceStatus.RUNNING
+
+        if service_was_running:
+            logger.info(f"Service '{service_config.name}' is running, will stop before rebuild")
+
     if config.dry_run:
         result.status = RebuildStatus.DRY_RUN
         result.message = f"Would run: {binary_config.build_cmd}"
         logger.info(f"[DRY-RUN] Would rebuild {binary_config.name}: {binary_config.build_cmd}")
+
+        # Show what service operations would happen
+        if service_config.enabled and service_was_running:
+            logger.info(f"[DRY-RUN] Would stop service '{service_config.name}'")
+            if service_config.restart_after_build:
+                logger.info(f"[DRY-RUN] Would restart service '{service_config.name}'")
+
+        if binary_config.test_cmd:
+            run_test_command(binary_config, config, logger)
         return result
 
-    logger.info(f"Rebuilding {binary_config.name}...")
-    logger.debug(f"Command: {binary_config.build_cmd}")
+    # Stop service before rebuild if needed
+    if service_config.enabled and service_was_running:
+        stop_result = stop_service(service_config, logger, config.dry_run)
+        result.service_stopped = stop_result.success
+
+        if not stop_result.success:
+            result.status = RebuildStatus.FAILED
+            result.failure_reason = BuildFailureReason.SERVICE_STOP_FAILED
+            result.message = f"Failed to stop service: {stop_result.message}"
+            result.suggestion = f"Manually stop the service with: {_get_stop_command_hint(service_config)}"
+            logger.error(result.message)
+            return result
 
     # Prepare environment
     env = os.environ.copy()
     env.update(binary_config.env)
-
-    # Determine working directory
     working_dir = config.root_dir / binary_config.working_dir
 
-    start_time = time.time()
-    try:
-        proc = subprocess.run(
-            binary_config.build_cmd,
-            shell=True,
-            cwd=working_dir,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=binary_config.timeout,
-        )
-        duration = time.time() - start_time
-        result.duration = duration
+    # Retry loop
+    max_attempts = binary_config.retry_count + 1
+    last_error = ""
 
-        if proc.returncode == 0:
-            result.status = RebuildStatus.SUCCESS
-            result.message = f"Built in {duration:.1f}s"
-            result.output = proc.stdout
+    for attempt in range(max_attempts):
+        result.retry_attempt = attempt
 
-            # Update manifest
-            current_commit, current_hashes, current_mtimes = get_source_fingerprint(
-                config.root_dir, binary_config.source_patterns, config.track_by
-            )
-            manifest.records[binary_config.name] = BuildRecord(
-                binary_name=binary_config.name,
-                built_at=datetime.now(timezone.utc).isoformat(),
-                source_commit=current_commit,
-                source_hashes=current_hashes,
-                source_mtimes=current_mtimes,
-                build_duration=duration,
-                success=True,
-            )
-            logger.success(f"Rebuilt {binary_config.name} in {duration:.1f}s")
-
-            # Codesign if enabled (and not dry-run - that's handled in codesign_binary)
-            if binary_config.codesign.enabled and not config.dry_run:
-                cs_result = codesign_binary(binary_config, config, logger)
-                if cs_result.status == CodesignStatus.FAILED:
-                    # Note in output but don't fail the build
-                    result.output += f"\nCodesign warning: {cs_result.message}"
+        if attempt > 0:
+            logger.info(f"Retrying {binary_config.name} (attempt {attempt + 1}/{max_attempts})...")
+            time.sleep(binary_config.retry_delay_seconds)
         else:
-            result.status = RebuildStatus.FAILED
-            result.message = f"Build failed with exit code {proc.returncode}"
-            result.output = proc.stderr or proc.stdout
-            logger.error(f"Failed to rebuild {binary_config.name}: {result.message}")
-            if result.output and config.verbose:
-                for line in result.output.strip().split("\n"):
-                    logger.debug(f"  {line}")
+            logger.info(f"Rebuilding {binary_config.name}...")
 
-    except subprocess.TimeoutExpired:
-        result.status = RebuildStatus.FAILED
-        result.message = f"Build timed out after {binary_config.timeout}s"
-        result.duration = time.time() - start_time
-        logger.error(f"Build timed out for {binary_config.name}")
+        logger.debug(f"Command: {binary_config.build_cmd}")
 
-    except Exception as e:
-        result.status = RebuildStatus.FAILED
-        result.message = str(e)
-        result.duration = time.time() - start_time
-        logger.error(f"Build error for {binary_config.name}: {e}")
+        start_time = time.time()
+        try:
+            proc = subprocess.run(
+                binary_config.build_cmd,
+                shell=True,
+                cwd=working_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=binary_config.timeout,
+            )
+            duration = time.time() - start_time
+            result.duration = duration
+            result.exit_code = proc.returncode
+
+            if proc.returncode == 0:
+                result.status = RebuildStatus.SUCCESS
+                result.message = f"Built in {duration:.1f}s"
+                result.output = proc.stdout
+                logger.success(f"Rebuilt {binary_config.name} in {duration:.1f}s")
+
+                # Ensure executable permissions if enabled
+                if binary_config.ensure_executable:
+                    binary_path = binary_config.get_expanded_install_path()
+                    if not ensure_binary_executable(binary_path, logger, config.dry_run):
+                        result.output += "\nWarning: Could not set executable permissions"
+
+                # Run tests if configured
+                if binary_config.test_cmd:
+                    test_success, test_output, test_duration = run_test_command(
+                        binary_config, config, logger
+                    )
+                    result.test_output = test_output
+                    result.test_duration = test_duration
+
+                    if not test_success:
+                        result.status = RebuildStatus.TEST_FAILED
+                        result.failure_reason = BuildFailureReason.TEST_FAILED
+                        result.message = f"Build succeeded but tests failed"
+                        result.suggestion = "Review test output and fix failing tests"
+
+                        # Still restart service even if tests failed (binary was built)
+                        if service_config.enabled and service_was_running and service_config.restart_after_build:
+                            start_result = start_service(service_config, logger, config.dry_run)
+                            result.service_started = start_result.success
+                            result.service_status = start_result.status
+
+                        # Record failed test in manifest
+                        current_commit, current_hashes, current_mtimes = get_source_fingerprint(
+                            config.root_dir, binary_config.source_patterns, config.track_by
+                        )
+                        manifest.records[binary_config.name] = BuildRecord(
+                            binary_name=binary_config.name,
+                            built_at=datetime.now(timezone.utc).isoformat(),
+                            source_commit=current_commit,
+                            source_hashes=current_hashes,
+                            source_mtimes=current_mtimes,
+                            build_duration=duration,
+                            success=False,
+                            error=f"Tests failed: {test_output[:200]}",
+                        )
+                        return result
+
+                # Codesign if enabled
+                if binary_config.codesign.enabled:
+                    cs_result = codesign_binary(binary_config, config, logger)
+                    if cs_result.status == CodesignStatus.FAILED:
+                        result.output += f"\nCodesign warning: {cs_result.message}"
+
+                # Restart service if it was running and restart is enabled
+                if service_config.enabled and service_was_running and service_config.restart_after_build:
+                    start_result = start_service(service_config, logger, config.dry_run)
+                    result.service_started = start_result.success
+                    result.service_status = start_result.status
+
+                    if not start_result.success:
+                        # Build succeeded but service failed to restart
+                        result.output += f"\nWarning: Service restart failed: {start_result.message}"
+                        logger.warn(f"Build succeeded but service restart failed")
+                        logger.info(f"  💡 Start manually: {_get_start_command_hint(service_config)}")
+
+                # Update manifest with success
+                current_commit, current_hashes, current_mtimes = get_source_fingerprint(
+                    config.root_dir, binary_config.source_patterns, config.track_by
+                )
+                manifest.records[binary_config.name] = BuildRecord(
+                    binary_name=binary_config.name,
+                    built_at=datetime.now(timezone.utc).isoformat(),
+                    source_commit=current_commit,
+                    source_hashes=current_hashes,
+                    source_mtimes=current_mtimes,
+                    build_duration=duration,
+                    success=True,
+                )
+                return result
+
+            else:
+                # Build failed
+                stderr = proc.stderr or ""
+                stdout = proc.stdout or ""
+                result.output = stderr or stdout
+                result.exit_code = proc.returncode
+                last_error = f"Build failed with exit code {proc.returncode}"
+
+                # Categorize the failure
+                failure_reason, suggestion = categorize_build_failure(
+                    proc.returncode, stderr, stdout, binary_config.language
+                )
+                result.failure_reason = failure_reason
+                result.suggestion = suggestion
+
+                if attempt < max_attempts - 1:
+                    logger.warn(f"Build failed, will retry: {last_error}")
+                    continue
+
+        except subprocess.TimeoutExpired:
+            result.duration = time.time() - start_time
+            result.failure_reason = BuildFailureReason.TIMEOUT
+            result.suggestion = f"Build exceeded {binary_config.timeout}s timeout. Consider increasing 'timeout' setting"
+            last_error = f"Build timed out after {binary_config.timeout}s"
+
+            if attempt < max_attempts - 1:
+                logger.warn(f"Build timed out, will retry")
+                continue
+
+        except Exception as e:
+            result.duration = time.time() - start_time
+            result.failure_reason = BuildFailureReason.UNKNOWN
+            result.suggestion = "Unexpected error. Check system logs and build environment"
+            last_error = str(e)
+
+            if attempt < max_attempts - 1:
+                logger.warn(f"Build error, will retry: {e}")
+                continue
+
+    # All attempts failed
+    result.status = RebuildStatus.FAILED
+    result.message = last_error
+    logger.error(f"Failed to rebuild {binary_config.name}: {last_error}")
+
+    if result.suggestion:
+        logger.info(f"  💡 Suggestion: {result.suggestion}")
+
+    if result.output and config.verbose:
+        for line in result.output.strip().split("\n")[:20]:  # Limit output
+            logger.debug(f"  {line}")
+
+    # Record failure in manifest
+    current_commit, current_hashes, current_mtimes = get_source_fingerprint(
+        config.root_dir, binary_config.source_patterns, config.track_by
+    )
+    manifest.records[binary_config.name] = BuildRecord(
+        binary_name=binary_config.name,
+        built_at=datetime.now(timezone.utc).isoformat(),
+        source_commit=current_commit,
+        source_hashes=current_hashes,
+        source_mtimes=current_mtimes,
+        build_duration=result.duration,
+        success=False,
+        error=last_error[:500],  # Truncate long errors
+    )
 
     return result
 
@@ -2112,16 +3079,27 @@ def rebuild_stale_binaries(config: TrackConfig, logger: Logger, rebuild_all: boo
     # Summary
     success_count = sum(1 for r in result.rebuilds if r.status == RebuildStatus.SUCCESS)
     failed_count = sum(1 for r in result.rebuilds if r.status == RebuildStatus.FAILED)
+    test_failed_count = sum(1 for r in result.rebuilds if r.status == RebuildStatus.TEST_FAILED)
 
     if not config.quiet and not config.json_output:
         print()
-        if failed_count == 0:
+        if failed_count == 0 and test_failed_count == 0:
             logger.success(f"Successfully rebuilt {success_count} binary(ies)")
         else:
-            logger.warn(f"Rebuilt {success_count}, failed {failed_count}")
+            parts = [f"{success_count} succeeded"]
+            if failed_count > 0:
+                parts.append(f"{failed_count} failed")
+            if test_failed_count > 0:
+                parts.append(f"{test_failed_count} tests failed")
+            logger.warn(", ".join(parts))
 
-    result.stale_count = failed_count
-    result.all_current = failed_count == 0
+            # Show suggestions for failures
+            for r in result.rebuilds:
+                if r.status in (RebuildStatus.FAILED, RebuildStatus.TEST_FAILED) and r.suggestion:
+                    logger.info(f"  💡 {r.name}: {r.suggestion}")
+
+    result.stale_count = failed_count + test_failed_count
+    result.all_current = failed_count == 0 and test_failed_count == 0
 
     return result
 
@@ -2329,7 +3307,7 @@ def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
     config_path = config.root_dir / CONFIG_FILE_NAMES[0]
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
-            file_config = json.load(f)
+            file_config = yaml.safe_load(f) or {}
     else:
         file_config = {"binaries": {}}
 
@@ -2344,7 +3322,7 @@ def add_binary_interactive(config: TrackConfig, logger: Logger) -> None:
     }
 
     with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(file_config, f, indent=2)
+        yaml.dump(file_config, f, default_flow_style=False, sort_keys=False)
 
     logger.success(f"Added '{name}' to {config_path}")
 
@@ -2400,7 +3378,7 @@ Examples:
   binary-track --remove mytool    # Remove a binary from tracking
 
 Configuration:
-  Create .binariesrc.json in your project root with binary definitions.
+  Create .binariesrc.yaml in your project root with binary definitions.
 
 Tracking Methods:
   - git_commit: Track source by git commit (recommended)
@@ -2433,7 +3411,7 @@ Pre-commit Integration:
     parser.add_argument(
         "--config",
         type=Path,
-        help="Path to configuration file (default: .binariesrc.json)",
+        help="Path to configuration file (default: .binariesrc.yaml)",
     )
 
     # Actions (mutually exclusive main commands)
@@ -2543,8 +3521,8 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as e:
         print(f"{Colors.RED}Error:{Colors.RESET} {e}", file=sys.stderr)
         return 1
-    except json.JSONDecodeError as e:
-        print(f"{Colors.RED}Error:{Colors.RESET} Invalid JSON in config file: {e}", file=sys.stderr)
+    except yaml.YAMLError as e:
+        print(f"{Colors.RED}Error:{Colors.RESET} Invalid YAML in config file: {e}", file=sys.stderr)
         return 1
 
     env_config = load_env_config()
@@ -2574,7 +3552,7 @@ def main(argv: list[str] | None = None) -> int:
     # Check if we have any binaries configured (for most actions)
     if not config.binaries and not args.add:
         if not args.json_output:
-            logger.info("No binaries configured. Use --add to add a binary or create .binariesrc.json")
+            logger.info("No binaries configured. Use --add to add a binary or create .binariesrc.yaml")
             logger.info("\nExample configuration:")
             example = {
                 "binaries": {
@@ -2588,7 +3566,7 @@ def main(argv: list[str] | None = None) -> int:
                 "track_by": "git_commit",
                 "pre_commit_policy": "warn",
             }
-            print(json.dumps(example, indent=2))
+            print(yaml.dump(example, default_flow_style=False, sort_keys=False))
         return 0
 
     # Execute action

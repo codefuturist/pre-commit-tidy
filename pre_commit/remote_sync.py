@@ -16,7 +16,7 @@ Usage:
     remote-sync [options]
 
 Options:
-    --config PATH       Path to configuration file (default: .remotesyncrc.json)
+    --config PATH       Path to configuration file (default: .remotesyncrc.yaml)
     --push              Push current branch to all configured remotes
     --push-all          Push all branches to their configured remotes
     --status            Show sync status dashboard
@@ -31,6 +31,11 @@ Options:
     --branch NAME       Target specific branch (default: current branch)
     --force             Allow force push (requires explicit flag)
     --no-parallel       Disable parallel pushing
+    --retry N           Retry count for push operations (default: 3)
+    --timeout SECS      Timeout in seconds for operations (default: 60)
+    --max-workers N     Maximum parallel workers (default: 4)
+    --no-offline-queue  Disable offline queuing of failed pushes
+    --branches PATTERNS Branch patterns to sync, comma-separated (default: *)
     --help              Show this help message
     --version           Show version number
 
@@ -45,8 +50,25 @@ Smart Defaults:
     - Offline queue: enabled (handles network issues)
     - Parallel push: enabled (faster)
 
+Pre-commit Integration:
+    Use remote-sync as a pre-commit hook without a config file:
+
+    # .pre-commit-config.yaml
+    - repo: local
+      hooks:
+      - id: remote-sync
+        name: remote-sync
+        entry: remote-sync --push
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [post-commit]
+
+    Customize via CLI args:
+        entry: remote-sync --push --remote origin,gitlab --branches main
+
 Configuration:
-    Optional .remotesyncrc.json file for customization:
+    Optional .remotesyncrc.yaml file for advanced customization:
 
     {
         "remotes": {
@@ -73,8 +95,18 @@ Configuration:
         "offline_queue": true,
         "health_check_timeout": 10,
         "auto_fetch": true,
-        "fetch_prune": true
+        "fetch_prune": true,
+        "binaries": {
+            "git": "/usr/local/bin/git",
+            "rsync": "/usr/local/bin/rsync",
+            "ssh": "/usr/bin/ssh"
+        }
     }
+
+    Custom Binary Paths:
+    - Override paths to git, rsync, and ssh binaries
+    - Useful when binaries are in non-standard locations
+    - Supports absolute paths
 
 Environment Variables:
     REMOTE_SYNC_PARALLEL        Set to 'false' to disable parallel push
@@ -102,11 +134,13 @@ from enum import Enum
 from pathlib import Path
 from typing import TypedDict
 
+import yaml
+
 # Version
 __version__ = "1.0.0"
 
 # Default configuration file names
-CONFIG_FILE_NAMES = [".remotesyncrc.json", ".remotesyncrc", "remote-sync.config.json"]
+CONFIG_FILE_NAMES = [".remotesyncrc.yaml", ".remotesyncrc.yml", "remote-sync.config.yaml"]
 
 # Offline queue file
 QUEUE_FILE = ".remote-sync-queue.json"
@@ -991,11 +1025,12 @@ def branch_matches_pattern(branch: str, patterns: list[str]) -> bool:
 
 
 def load_config_file(config_path: Path | None = None) -> ConfigDict:
-    """Load configuration from file."""
+    """Load configuration from YAML file."""
     if config_path and config_path.exists():
         try:
-            return json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as e:
+            with open(config_path, encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+        except (yaml.YAMLError, OSError) as e:
             logger.warning(f"Failed to load config file {config_path}: {e}")
             return {}
 
@@ -1004,8 +1039,9 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         path = Path(name)
         if path.exists():
             try:
-                return json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError):
+                with open(path, encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+            except (yaml.YAMLError, OSError):
                 continue
 
     return {}
@@ -1105,9 +1141,10 @@ def load_queue(queue_path: Path | None = None) -> OfflineQueue:
         return OfflineQueue()
 
     try:
-        data = json.loads(path.read_text())
+        with open(path, encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
         return OfflineQueue.from_dict(data)
-    except (json.JSONDecodeError, OSError):
+    except (yaml.YAMLError, OSError):
         return OfflineQueue()
 
 
@@ -1119,7 +1156,8 @@ def save_queue(queue: OfflineQueue, queue_path: Path | None = None) -> bool:
         queue.created_at = queue.updated_at
 
     try:
-        path.write_text(json.dumps(queue.to_dict(), indent=2))
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.dump(queue.to_dict(), f, default_flow_style=False, sort_keys=False)
         return True
     except OSError as e:
         logger.error(f"Failed to save queue: {e}")
@@ -2562,7 +2600,7 @@ Examples:
   remote-sync --sync-targets         Sync to filesystem/rsync targets
   remote-sync --sync-targets --target backup-nas  Sync to specific target
 
-Configuration file (.remotesyncrc.json):
+Configuration file (.remotesyncrc.yaml):
   {
     "remotes": {
       "origin": {"priority": 1, "branches": ["*"], "force_push": "block"},
@@ -2676,6 +2714,39 @@ Configuration file (.remotesyncrc.json):
         action="store_true",
         help="Suppress all output except errors",
     )
+
+    # Advanced options (override config file settings)
+    advanced_group = parser.add_argument_group("advanced options")
+    advanced_group.add_argument(
+        "--retry",
+        type=int,
+        metavar="N",
+        help="Retry count for push operations (default: 3, backup remotes: 5)",
+    )
+    advanced_group.add_argument(
+        "--timeout",
+        type=int,
+        metavar="SECS",
+        help="Timeout in seconds for push operations (default: 60)",
+    )
+    advanced_group.add_argument(
+        "--max-workers",
+        type=int,
+        metavar="N",
+        help="Maximum parallel workers (default: 4)",
+    )
+    advanced_group.add_argument(
+        "--no-offline-queue",
+        action="store_true",
+        help="Disable offline queuing of failed pushes",
+    )
+    advanced_group.add_argument(
+        "--branches",
+        type=str,
+        metavar="PATTERNS",
+        help="Branch patterns to sync, comma-separated (default: '*' for all)",
+    )
+
     parser.add_argument(
         "--version",
         action="version",
@@ -2705,8 +2776,15 @@ def main(argv: list[str] | None = None) -> int:
     config.verbose = args.verbose or os.environ.get("REMOTE_SYNC_VERBOSE", "").lower() == "true"
     config.quiet = args.quiet
 
+    # Apply CLI overrides (highest priority)
     if args.no_parallel:
         config.parallel = False
+    if args.max_workers is not None:
+        config.max_workers = args.max_workers
+    if args.no_offline_queue:
+        config.offline_queue = False
+    if args.timeout is not None:
+        config.health_check_timeout = args.timeout
 
     # Set global config for binary paths
     set_global_config(config)
@@ -2717,6 +2795,16 @@ def main(argv: list[str] | None = None) -> int:
     if not config.remotes:
         logger.error("No git remotes found. Add a remote with 'git remote add <name> <url>'")
         return 1
+
+    # Apply CLI overrides to all remotes (highest priority)
+    if args.retry is not None or args.timeout is not None or args.branches:
+        for remote in config.remotes.values():
+            if args.retry is not None:
+                remote.retry = args.retry
+            if args.timeout is not None:
+                remote.timeout = args.timeout
+            if args.branches:
+                remote.branches = [b.strip() for b in args.branches.split(",")]
 
     # Parse target remotes
     target_remotes = None

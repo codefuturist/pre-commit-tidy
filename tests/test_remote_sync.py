@@ -244,9 +244,9 @@ class TestLoadConfigFile:
         assert config == {}
 
     def test_load_invalid_json(self, tmp_path: Path) -> None:
-        """Test loading invalid JSON returns empty dict."""
-        config_file = tmp_path / ".remotesyncrc.json"
-        config_file.write_text("invalid json {")
+        """Test loading invalid YAML returns empty dict."""
+        config_file = tmp_path / ".remotesyncrc.yaml"
+        config_file.write_text("invalid: yaml: {")
 
         config = load_config_file(config_file)
         assert config == {}

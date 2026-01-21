@@ -11,12 +11,14 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from pre_commit.binary_track import (
     BinaryConfig,
     BinaryStatus,
     BinaryStatusResult,
     BinaryType,
+    BuildFailureReason,
     BuildManifest,
     BuildRecord,
     CodesignConfig,
@@ -28,11 +30,17 @@ from pre_commit.binary_track import (
     Platform,
     PreCommitPolicy,
     RebuildStatus,
+    ServiceConfig,
+    ServiceResult,
+    ServiceStatus,
+    ServiceType,
     TrackConfig,
     TrackingMethod,
+    categorize_build_failure,
     check_binary_health,
     codesign_binary,
     compute_file_hash,
+    ensure_binary_executable,
     ensure_install_path_exists,
     expand_patterns,
     get_current_commit,
@@ -40,6 +48,7 @@ from pre_commit.binary_track import (
     get_default_install_locations,
     get_path_setup_instructions,
     get_recommended_install_path,
+    get_service_status,
     get_source_fingerprint,
     is_binary_stale,
     is_codesign_available,
@@ -48,6 +57,8 @@ from pre_commit.binary_track import (
     load_env_config,
     load_manifest,
     save_manifest,
+    start_service,
+    stop_service,
     verify_signature,
 )
 
@@ -173,7 +184,7 @@ class TestLoadConfigFile:
 
     def test_load_existing_config(self, tmp_path: Path) -> None:
         """Test loading an existing config file."""
-        config_file = tmp_path / ".binariesrc.json"
+        config_file = tmp_path / ".binariesrc.yaml"
         config_data = {
             "binaries": {
                 "mytool": {
@@ -184,7 +195,8 @@ class TestLoadConfigFile:
             },
             "track_by": "mtime",
         }
-        config_file.write_text(json.dumps(config_data))
+        with open(config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(config_data, f)
 
         os.chdir(tmp_path)
         loaded = load_config_file(root_dir=tmp_path)
@@ -195,11 +207,12 @@ class TestLoadConfigFile:
 
     def test_load_explicit_config_path(self, tmp_path: Path) -> None:
         """Test loading config from explicit path."""
-        config_file = tmp_path / "custom-config.json"
+        config_file = tmp_path / "custom-config.yaml"
         config_data = {"binaries": {"tool": {"build_cmd": "make"}}}
-        config_file.write_text(json.dumps(config_data))
+        with open(config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(config_data, f)
 
-        loaded = load_config_file(Path("custom-config.json"), root_dir=tmp_path)
+        loaded = load_config_file(Path("custom-config.yaml"), root_dir=tmp_path)
         assert "tool" in loaded["binaries"]
 
     def test_load_missing_config(self, tmp_path: Path) -> None:
@@ -320,9 +333,9 @@ class TestSaveLoadManifest:
         assert manifest.records == {}
 
     def test_load_invalid_manifest(self, tmp_path: Path) -> None:
-        """Test loading invalid JSON manifest."""
+        """Test loading invalid YAML manifest."""
         manifest_path = tmp_path / ".binary-track-manifest.json"
-        manifest_path.write_text("invalid json{")
+        manifest_path.write_text("invalid: yaml: {{{")
 
         manifest = load_manifest(tmp_path)
         assert manifest.records == {}
@@ -606,8 +619,9 @@ class TestIntegration:
             },
             "track_by": "hash",
         }
-        config_file = tmp_path / ".binariesrc.json"
-        config_file.write_text(json.dumps(config_data))
+        config_file = tmp_path / ".binariesrc.yaml"
+        with open(config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(config_data, f)
 
         # Load config
         loaded = load_config_file(root_dir=tmp_path)
@@ -1423,3 +1437,870 @@ class TestTrackResultWithShadows:
         assert output["statuses"][0]["shadow_conflicts"][0]["path"] == "/usr/local/bin/mytool"
         assert output["statuses"][0]["shadow_conflicts"][0]["scope"] == "system"
         assert output["statuses"][0]["shadow_conflicts"][0]["is_executable"] is True
+
+
+class TestEnsureBinaryExecutable:
+    """Tests for the ensure_binary_executable function."""
+
+    def test_sets_executable_on_non_executable_file(self, tmp_path: Path) -> None:
+        """Test that it sets executable bit on a non-executable file."""
+        from pre_commit.binary_track import Logger
+
+        binary = tmp_path / "mytool"
+        binary.write_text("#!/bin/sh\necho hello")
+        # Explicitly no execute permission
+        binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+        assert not os.access(binary, os.X_OK)
+
+        logger = Logger(verbose=True, quiet=False)
+        result = ensure_binary_executable(binary, logger)
+
+        assert result is True
+        assert os.access(binary, os.X_OK)
+
+    def test_already_executable_returns_true(self, tmp_path: Path) -> None:
+        """Test that it returns True for already-executable files."""
+        from pre_commit.binary_track import Logger
+
+        binary = tmp_path / "mytool"
+        binary.write_text("#!/bin/sh\necho hello")
+        binary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+        assert os.access(binary, os.X_OK)
+
+        logger = Logger(verbose=True, quiet=False)
+        result = ensure_binary_executable(binary, logger)
+
+        assert result is True
+        assert os.access(binary, os.X_OK)
+
+    def test_skips_directories(self, tmp_path: Path) -> None:
+        """Test that it skips directories (e.g., .app bundles)."""
+        from pre_commit.binary_track import Logger
+
+        app_dir = tmp_path / "MyApp.app"
+        app_dir.mkdir()
+
+        logger = Logger(verbose=True, quiet=False)
+        result = ensure_binary_executable(app_dir, logger)
+
+        assert result is True  # Returns True for directories (skipped)
+
+    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
+        """Test that it returns False for missing files."""
+        from pre_commit.binary_track import Logger
+
+        binary = tmp_path / "nonexistent"
+
+        logger = Logger(verbose=True, quiet=False)
+        result = ensure_binary_executable(binary, logger)
+
+        assert result is False
+
+    def test_dry_run_does_not_change_permissions(self, tmp_path: Path) -> None:
+        """Test that dry_run logs but doesn't change permissions."""
+        from pre_commit.binary_track import Logger
+
+        binary = tmp_path / "mytool"
+        binary.write_text("#!/bin/sh\necho hello")
+        binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+        assert not os.access(binary, os.X_OK)
+
+        logger = Logger(verbose=True, quiet=False)
+        result = ensure_binary_executable(binary, logger, dry_run=True)
+
+        assert result is True  # Returns True in dry-run
+        assert not os.access(binary, os.X_OK)  # But file is still not executable
+
+
+class TestEnsureExecutableConfig:
+    """Tests for ensure_executable configuration parsing."""
+
+    def test_binary_config_default_ensure_executable(self) -> None:
+        """Test that ensure_executable defaults to True."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.ensure_executable is True
+
+    def test_binary_config_explicit_ensure_executable_true(self) -> None:
+        """Test explicitly setting ensure_executable to True."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+            "ensure_executable": True,
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.ensure_executable is True
+
+    def test_binary_config_explicit_ensure_executable_false(self) -> None:
+        """Test explicitly setting ensure_executable to False."""
+        data = {
+            "source_patterns": ["*.c"],
+            "build_cmd": "gcc -shared -o libhelper.so helper.c",
+            "install_path": "~/.local/lib/libhelper.so",
+            "ensure_executable": False,
+        }
+        config = BinaryConfig.from_dict("libhelper", data)
+
+        assert config.ensure_executable is False
+
+    def test_track_config_default_ensure_executable(self) -> None:
+        """Test TrackConfig defaults ensure_executable to True."""
+        config = TrackConfig.from_dict({})
+
+        assert config.ensure_executable is True
+
+    def test_track_config_global_ensure_executable_false(self) -> None:
+        """Test TrackConfig respects global ensure_executable setting."""
+        data: ConfigDict = {
+            "ensure_executable": False,
+            "binaries": {
+                "mytool": {
+                    "source_patterns": ["*.go"],
+                    "build_cmd": "go build",
+                    "install_path": "~/.local/bin/mytool",
+                },
+            },
+        }
+        config = TrackConfig.from_dict(data)
+
+        assert config.ensure_executable is False
+        assert config.binaries["mytool"].ensure_executable is False
+
+    def test_binary_overrides_global_ensure_executable(self) -> None:
+        """Test per-binary setting overrides global."""
+        data: ConfigDict = {
+            "ensure_executable": False,
+            "binaries": {
+                "mytool": {
+                    "source_patterns": ["*.go"],
+                    "build_cmd": "go build",
+                    "install_path": "~/.local/bin/mytool",
+                    "ensure_executable": True,  # Override global
+                },
+                "libhelper": {
+                    "source_patterns": ["*.c"],
+                    "build_cmd": "make libhelper.so",
+                    "install_path": "~/.local/lib/libhelper.so",
+                    # Inherits global False
+                },
+            },
+        }
+        config = TrackConfig.from_dict(data)
+
+        assert config.ensure_executable is False
+        assert config.binaries["mytool"].ensure_executable is True  # Overridden
+        assert config.binaries["libhelper"].ensure_executable is False  # Inherited
+
+
+class TestBuildFailureReason:
+    """Tests for BuildFailureReason enum and categorization."""
+
+    def test_failure_reason_values(self) -> None:
+        """Test BuildFailureReason enum values."""
+        from pre_commit.binary_track import BuildFailureReason
+
+        assert BuildFailureReason.COMMAND_NOT_FOUND.value == "command_not_found"
+        assert BuildFailureReason.COMPILATION_ERROR.value == "compilation_error"
+        assert BuildFailureReason.LINKER_ERROR.value == "linker_error"
+        assert BuildFailureReason.TIMEOUT.value == "timeout"
+        assert BuildFailureReason.PERMISSION_DENIED.value == "permission_denied"
+        assert BuildFailureReason.MISSING_DEPENDENCY.value == "missing_dependency"
+        assert BuildFailureReason.TEST_FAILED.value == "test_failed"
+        assert BuildFailureReason.UNKNOWN.value == "unknown"
+
+
+class TestCategorizeBuildFailure:
+    """Tests for the categorize_build_failure function."""
+
+    def test_command_not_found(self) -> None:
+        """Test detection of command not found errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            127, "bash: go: command not found", "", "go"
+        )
+        assert reason == BuildFailureReason.COMMAND_NOT_FOUND
+        assert "go" in suggestion.lower()
+
+    def test_permission_denied(self) -> None:
+        """Test detection of permission denied errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            1, "error: permission denied: /usr/local/bin/mytool", "", ""
+        )
+        assert reason == BuildFailureReason.PERMISSION_DENIED
+        assert "permission" in suggestion.lower()
+
+    def test_missing_dependency(self) -> None:
+        """Test detection of missing file/dependency errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            1, "fatal: cannot find file 'main.go'", "", "go"
+        )
+        assert reason == BuildFailureReason.MISSING_DEPENDENCY
+
+    def test_go_compilation_error(self) -> None:
+        """Test detection of Go compilation errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            1, "undefined: someFunction", "", "go"
+        )
+        assert reason == BuildFailureReason.COMPILATION_ERROR
+
+    def test_rust_compilation_error(self) -> None:
+        """Test detection of Rust compilation errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            1, "error[E0425]: cannot find value", "", "rust"
+        )
+        assert reason == BuildFailureReason.COMPILATION_ERROR
+        assert "cargo" in suggestion.lower()
+
+    def test_linker_error(self) -> None:
+        """Test detection of linker errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            1, "undefined reference to `main'", "", "c"
+        )
+        assert reason == BuildFailureReason.LINKER_ERROR
+
+    def test_unknown_error(self) -> None:
+        """Test fallback to unknown for unrecognized errors."""
+        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
+
+        reason, suggestion = categorize_build_failure(
+            42, "some obscure error message", "", ""
+        )
+        assert reason == BuildFailureReason.UNKNOWN
+
+
+class TestRebuildResultEnhancements:
+    """Tests for enhanced RebuildResult dataclass."""
+
+    def test_rebuild_result_has_new_fields(self) -> None:
+        """Test that RebuildResult has all enhanced fields."""
+        from pre_commit.binary_track import RebuildResult, RebuildStatus, BuildFailureReason
+
+        result = RebuildResult(
+            name="mytool",
+            status=RebuildStatus.FAILED,
+            duration=5.5,
+            message="Build failed",
+            output="error output",
+            failure_reason=BuildFailureReason.COMPILATION_ERROR,
+            exit_code=1,
+            test_output="",
+            test_duration=0.0,
+            suggestion="Check the code",
+            retry_attempt=2,
+        )
+
+        assert result.name == "mytool"
+        assert result.status == RebuildStatus.FAILED
+        assert result.failure_reason == BuildFailureReason.COMPILATION_ERROR
+        assert result.exit_code == 1
+        assert result.suggestion == "Check the code"
+        assert result.retry_attempt == 2
+
+    def test_rebuild_result_defaults(self) -> None:
+        """Test RebuildResult default values."""
+        from pre_commit.binary_track import RebuildResult, RebuildStatus
+
+        result = RebuildResult(name="mytool", status=RebuildStatus.SUCCESS)
+
+        assert result.failure_reason is None
+        assert result.exit_code is None
+        assert result.test_output == ""
+        assert result.test_duration == 0.0
+        assert result.suggestion == ""
+        assert result.retry_attempt == 0
+
+
+class TestRebuildStatusTestFailed:
+    """Tests for TEST_FAILED rebuild status."""
+
+    def test_test_failed_status_exists(self) -> None:
+        """Test that TEST_FAILED status exists."""
+        from pre_commit.binary_track import RebuildStatus
+
+        assert RebuildStatus.TEST_FAILED.value == "test_failed"
+
+
+class TestTestCommandConfig:
+    """Tests for test_cmd configuration parsing."""
+
+    def test_binary_config_default_test_cmd(self) -> None:
+        """Test that test_cmd defaults to empty string."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.test_cmd == ""
+        assert config.test_timeout == 60
+        assert config.retry_count == 0
+        assert config.retry_delay_seconds == 1.0
+
+    def test_binary_config_with_test_cmd(self) -> None:
+        """Test parsing test_cmd from config."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+            "test_cmd": "go test ./...",
+            "test_timeout": 120,
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.test_cmd == "go test ./..."
+        assert config.test_timeout == 120
+
+    def test_binary_config_with_retry(self) -> None:
+        """Test parsing retry configuration."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+            "retry_count": 3,
+            "retry_delay_seconds": 2.5,
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.retry_count == 3
+        assert config.retry_delay_seconds == 2.5
+
+    def test_binary_config_full_test_and_retry(self) -> None:
+        """Test parsing full test and retry configuration."""
+        data = {
+            "source_patterns": ["cmd/**/*.go"],
+            "build_cmd": "go build -o ~/.local/bin/mytool ./cmd/mytool",
+            "install_path": "~/.local/bin/mytool",
+            "language": "go",
+            "test_cmd": "go test -v ./...",
+            "test_timeout": 180,
+            "retry_count": 2,
+            "retry_delay_seconds": 5.0,
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.test_cmd == "go test -v ./..."
+        assert config.test_timeout == 180
+        assert config.retry_count == 2
+        assert config.retry_delay_seconds == 5.0
+        assert config.language == "go"
+
+
+# =============================================================================
+# Service Management Tests
+# =============================================================================
+
+
+class TestServiceType:
+    """Tests for the ServiceType enum."""
+
+    def test_service_type_values(self) -> None:
+        """Test that all expected service types exist."""
+        assert ServiceType.LAUNCHD.value == "launchd"
+        assert ServiceType.SYSTEMD.value == "systemd"
+        assert ServiceType.CUSTOM.value == "custom"
+        assert ServiceType.NONE.value == "none"
+
+
+class TestServiceStatus:
+    """Tests for the ServiceStatus enum."""
+
+    def test_service_status_values(self) -> None:
+        """Test that all expected service statuses exist."""
+        assert ServiceStatus.RUNNING.value == "running"
+        assert ServiceStatus.STOPPED.value == "stopped"
+        assert ServiceStatus.NOT_FOUND.value == "not_found"
+        assert ServiceStatus.UNKNOWN.value == "unknown"
+
+
+class TestServiceConfig:
+    """Tests for the ServiceConfig dataclass."""
+
+    def test_defaults(self) -> None:
+        """Test ServiceConfig default values."""
+        config = ServiceConfig()
+
+        assert config.enabled is False
+        assert config.service_type == ServiceType.NONE
+        assert config.name == ""
+        assert config.restart_after_build is True
+        assert config.stop_timeout_seconds == 30
+        assert config.start_timeout_seconds == 10
+        assert config.stop_cmd is None
+        assert config.start_cmd is None
+        assert config.status_cmd is None
+
+    def test_from_dict_empty(self) -> None:
+        """Test ServiceConfig.from_dict with empty dict."""
+        config = ServiceConfig.from_dict({})
+
+        assert config.enabled is False
+        assert config.service_type == ServiceType.NONE
+
+    def test_from_dict_launchd(self) -> None:
+        """Test ServiceConfig.from_dict for launchd service."""
+        data = {
+            "enabled": True,
+            "type": "launchd",
+            "name": "com.example.mytool",
+            "restart_after_build": True,
+        }
+        config = ServiceConfig.from_dict(data)
+
+        assert config.enabled is True
+        assert config.service_type == ServiceType.LAUNCHD
+        assert config.name == "com.example.mytool"
+        assert config.restart_after_build is True
+
+    def test_from_dict_systemd(self) -> None:
+        """Test ServiceConfig.from_dict for systemd service."""
+        data = {
+            "enabled": True,
+            "type": "systemd",
+            "name": "mytool.service",
+        }
+        config = ServiceConfig.from_dict(data)
+
+        assert config.enabled is True
+        assert config.service_type == ServiceType.SYSTEMD
+        assert config.name == "mytool.service"
+
+    def test_from_dict_custom(self) -> None:
+        """Test ServiceConfig.from_dict for custom service manager."""
+        data = {
+            "enabled": True,
+            "type": "custom",
+            "name": "mytool",
+            "stop_cmd": "supervisorctl stop mytool",
+            "start_cmd": "supervisorctl start mytool",
+            "status_cmd": "supervisorctl status mytool",
+        }
+        config = ServiceConfig.from_dict(data)
+
+        assert config.enabled is True
+        assert config.service_type == ServiceType.CUSTOM
+        assert config.stop_cmd == "supervisorctl stop mytool"
+        assert config.start_cmd == "supervisorctl start mytool"
+        assert config.status_cmd == "supervisorctl status mytool"
+
+    def test_from_dict_with_timeouts(self) -> None:
+        """Test ServiceConfig.from_dict with custom timeouts."""
+        data = {
+            "enabled": True,
+            "type": "launchd",
+            "name": "com.example.slowtool",
+            "stop_timeout_seconds": 60,
+            "start_timeout_seconds": 30,
+        }
+        config = ServiceConfig.from_dict(data)
+
+        assert config.stop_timeout_seconds == 60
+        assert config.start_timeout_seconds == 30
+
+    def test_from_dict_unknown_type_defaults_to_none(self) -> None:
+        """Test that unknown service types default to NONE."""
+        data = {
+            "enabled": True,
+            "type": "unknown_service_manager",
+            "name": "mytool",
+        }
+        config = ServiceConfig.from_dict(data)
+
+        assert config.service_type == ServiceType.NONE
+
+
+class TestServiceResult:
+    """Tests for the ServiceResult dataclass."""
+
+    def test_defaults(self) -> None:
+        """Test ServiceResult default values."""
+        result = ServiceResult(
+            name="myservice",
+            service_type=ServiceType.LAUNCHD,
+            status=ServiceStatus.RUNNING,
+            operation="status",
+        )
+
+        assert result.name == "myservice"
+        assert result.service_type == ServiceType.LAUNCHD
+        assert result.status == ServiceStatus.RUNNING
+        assert result.success is False
+        assert result.message == ""
+        assert result.duration == 0.0
+
+
+class TestBinaryConfigWithService:
+    """Tests for BinaryConfig service configuration."""
+
+    def test_binary_config_default_service(self) -> None:
+        """Test that service is disabled by default."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mytool",
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+
+        assert config.service.enabled is False
+        assert config.service.service_type == ServiceType.NONE
+
+    def test_binary_config_with_launchd_service(self) -> None:
+        """Test parsing launchd service configuration."""
+        data = {
+            "source_patterns": ["*.go"],
+            "build_cmd": "go build",
+            "install_path": "~/.local/bin/mydaemon",
+            "service": {
+                "enabled": True,
+                "type": "launchd",
+                "name": "com.example.mydaemon",
+            },
+        }
+        config = BinaryConfig.from_dict("mydaemon", data)
+
+        assert config.service.enabled is True
+        assert config.service.service_type == ServiceType.LAUNCHD
+        assert config.service.name == "com.example.mydaemon"
+
+    def test_binary_config_with_custom_service(self) -> None:
+        """Test parsing custom service configuration."""
+        data = {
+            "source_patterns": ["*.rs"],
+            "build_cmd": "cargo build --release",
+            "install_path": "~/.local/bin/myserver",
+            "service": {
+                "enabled": True,
+                "type": "custom",
+                "name": "myserver",
+                "stop_cmd": "pkill -f myserver",
+                "start_cmd": "~/.local/bin/myserver &",
+            },
+        }
+        config = BinaryConfig.from_dict("myserver", data)
+
+        assert config.service.enabled is True
+        assert config.service.service_type == ServiceType.CUSTOM
+        assert config.service.stop_cmd == "pkill -f myserver"
+        assert config.service.start_cmd == "~/.local/bin/myserver &"
+
+
+class TestGetServiceStatus:
+    """Tests for the get_service_status function."""
+
+    def test_service_not_configured(self) -> None:
+        """Test status check when service is not configured."""
+        config = ServiceConfig()
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.UNKNOWN
+        assert "not configured" in result.message
+
+    @patch("subprocess.run")
+    def test_launchd_service_running(self, mock_run: MagicMock) -> None:
+        """Test detecting running launchd service."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.RUNNING
+        assert result.success is True
+        mock_run.assert_called_once()
+
+    @patch("subprocess.run")
+    def test_launchd_service_not_found(self, mock_run: MagicMock) -> None:
+        """Test detecting launchd service not found."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Could not find service 'com.example.missing'",
+        )
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.missing",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.NOT_FOUND
+
+    @patch("subprocess.run")
+    def test_systemd_service_running(self, mock_run: MagicMock) -> None:
+        """Test detecting running systemd service."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="active\n", stderr="")
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.SYSTEMD,
+            name="test.service",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.RUNNING
+        assert result.success is True
+
+    @patch("subprocess.run")
+    def test_systemd_service_stopped(self, mock_run: MagicMock) -> None:
+        """Test detecting stopped systemd service."""
+        mock_run.return_value = MagicMock(returncode=3, stdout="inactive\n", stderr="")
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.SYSTEMD,
+            name="test.service",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.STOPPED
+
+    @patch("subprocess.run")
+    def test_custom_service_running(self, mock_run: MagicMock) -> None:
+        """Test detecting running custom service."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.CUSTOM,
+            name="myservice",
+            status_cmd="pgrep -f myservice",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.RUNNING
+        assert result.success is True
+
+    def test_custom_service_no_status_cmd(self) -> None:
+        """Test custom service without status command."""
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.CUSTOM,
+            name="myservice",
+        )
+        logger = MagicMock()
+
+        result = get_service_status(config, logger)
+
+        assert result.status == ServiceStatus.UNKNOWN
+        assert "No status command" in result.message
+
+
+class TestStopService:
+    """Tests for the stop_service function."""
+
+    def test_service_not_configured(self) -> None:
+        """Test stop when service is not configured."""
+        config = ServiceConfig()
+        logger = MagicMock()
+
+        result = stop_service(config, logger)
+
+        assert result.success is True
+        assert "not configured" in result.message
+
+    def test_dry_run(self) -> None:
+        """Test dry run mode."""
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = stop_service(config, logger, dry_run=True)
+
+        assert result.success is True
+        assert "[DRY-RUN]" in result.message
+
+    @patch("subprocess.run")
+    def test_launchd_stop_success(self, mock_run: MagicMock) -> None:
+        """Test successfully stopping launchd service."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = stop_service(config, logger)
+
+        assert result.success is True
+        assert result.status == ServiceStatus.STOPPED
+
+    @patch("subprocess.run")
+    def test_stop_failure(self, mock_run: MagicMock) -> None:
+        """Test stop failure."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Failed to stop service",
+        )
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = stop_service(config, logger)
+
+        assert result.success is False
+
+    def test_custom_service_no_stop_cmd(self) -> None:
+        """Test custom service without stop command."""
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.CUSTOM,
+            name="myservice",
+        )
+        logger = MagicMock()
+
+        result = stop_service(config, logger)
+
+        assert result.success is False
+        assert "No stop command" in result.message
+
+
+class TestStartService:
+    """Tests for the start_service function."""
+
+    def test_service_not_configured(self) -> None:
+        """Test start when service is not configured."""
+        config = ServiceConfig()
+        logger = MagicMock()
+
+        result = start_service(config, logger)
+
+        assert result.success is True
+        assert "not configured" in result.message
+
+    def test_dry_run(self) -> None:
+        """Test dry run mode."""
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = start_service(config, logger, dry_run=True)
+
+        assert result.success is True
+        assert "[DRY-RUN]" in result.message
+
+    @patch("pre_commit.binary_track.get_service_status")
+    @patch("subprocess.run")
+    def test_launchd_start_success(
+        self, mock_run: MagicMock, mock_status: MagicMock
+    ) -> None:
+        """Test successfully starting launchd service."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_status.return_value = ServiceResult(
+            name="com.example.test",
+            service_type=ServiceType.LAUNCHD,
+            status=ServiceStatus.RUNNING,
+            operation="status",
+            success=True,
+        )
+
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.LAUNCHD,
+            name="com.example.test",
+        )
+        logger = MagicMock()
+
+        result = start_service(config, logger)
+
+        assert result.success is True
+        assert result.status == ServiceStatus.RUNNING
+
+    def test_custom_service_no_start_cmd(self) -> None:
+        """Test custom service without start command."""
+        config = ServiceConfig(
+            enabled=True,
+            service_type=ServiceType.CUSTOM,
+            name="myservice",
+        )
+        logger = MagicMock()
+
+        result = start_service(config, logger)
+
+        assert result.success is False
+        assert "No start command" in result.message
+
+
+class TestRebuildResultServiceFields:
+    """Tests for RebuildResult service tracking fields."""
+
+    def test_rebuild_result_has_service_fields(self) -> None:
+        """Test that RebuildResult has service tracking fields."""
+        from pre_commit.binary_track import RebuildResult
+
+        result = RebuildResult(name="test", status=RebuildStatus.SUCCESS)
+
+        assert hasattr(result, "service_stopped")
+        assert hasattr(result, "service_started")
+        assert hasattr(result, "service_status")
+
+    def test_rebuild_result_service_defaults(self) -> None:
+        """Test RebuildResult service field defaults."""
+        from pre_commit.binary_track import RebuildResult
+
+        result = RebuildResult(name="test", status=RebuildStatus.SUCCESS)
+
+        assert result.service_stopped is False
+        assert result.service_started is False
+        assert result.service_status == ServiceStatus.UNKNOWN
+
+
+class TestBuildFailureReasonServiceErrors:
+    """Tests for service-related build failure reasons."""
+
+    def test_service_stop_failed_reason(self) -> None:
+        """Test SERVICE_STOP_FAILED reason exists."""
+        assert BuildFailureReason.SERVICE_STOP_FAILED.value == "service_stop_failed"
+
+    def test_service_start_failed_reason(self) -> None:
+        """Test SERVICE_START_FAILED reason exists."""
+        assert BuildFailureReason.SERVICE_START_FAILED.value == "service_start_failed"

@@ -6,9 +6,9 @@ This is a fork/extension of [pre-commit](https://pre-commit.com/) that adds thre
 
 | Tool | Config File | Purpose |
 |------|-------------|---------|
-| `tidy` | `.tidyrc.json` | Automated file organization with rule-based routing |
-| `binary-track` | `.binariesrc.json` | Track locally-built binaries and detect staleness |
-| `remote-sync` | `.remotesyncrc.json` | Keep multiple git remotes in sync |
+| `tidy` | `.tidyrc.yaml` | Automated file organization with rule-based routing |
+| `binary-track` | `.binariesrc.yaml` | Track locally-built binaries and detect staleness |
+| `remote-sync` | `.remotesyncrc.yaml` | Keep multiple git remotes in sync |
 
 ## Architecture
 

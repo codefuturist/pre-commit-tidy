@@ -176,7 +176,7 @@ except ImportError:
         )
 
 # Version
-__version__ = '1.2.0'
+__version__ = '2.0.0'
 
 # Default configuration file names to search for
 CONFIG_FILE_NAMES = ['.tidyrc.yaml', '.tidyrc.yml', 'tidy.config.yaml']

@@ -188,7 +188,7 @@ from typing import Any, TypedDict
 import yaml
 
 # Version
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # Default configuration file names
 CONFIG_FILE_NAMES = [".binariesrc.yaml", ".binariesrc.yml", "binaries.config.yaml"]

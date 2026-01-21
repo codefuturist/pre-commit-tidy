@@ -1,3 +1,52 @@
+2.0.0 - 2026-01-21
+==================
+
+### Major Release - pre-commit-tidy
+
+This is a major release introducing developer workflow tools as standalone CLI commands.
+
+### New Tools
+
+- **ai-fix**: AI-powered linting auto-fixer
+  - Smart model selection based on error complexity
+  - Support for GitHub Copilot CLI, Mistral Vibe, Ollama, Mistral API
+  - Batch processing: simple (10), moderate (3), complex (1 at a time)
+  - Iterative fixing with re-linting after each batch
+  - 45 unit tests, comprehensive configuration options
+  - Models: claude-haiku-4.5 (simple), claude-sonnet-4.5 (moderate), claude-opus-4.5 (complex)
+  - Vibe: devstral-small (simple), devstral-2 (moderate/complex)
+
+- **tidy**: File organization with rule-based routing
+  - Automated file organization based on patterns, extensions, or globs
+  - Duplicate handling (rename, skip, overwrite)
+  - Content-based deduplication via SHA-256
+  - Undo support with manifest
+  - Rule-based routing to different target directories
+
+- **remote-sync**: Multi-remote git synchronization
+  - Parallel push to multiple remotes
+  - Branch filtering per remote
+  - Health checks and divergence detection
+  - Offline queue for failed pushes
+  - VPN auto-connect support
+  - Filesystem and rsync sync targets
+
+- **binary-track**: Track locally-built binaries
+  - Detect stale binaries based on source file timestamps
+  - Configurable patterns and ignore lists
+
+### Documentation
+
+- Streamlined README (787 → 82 lines)
+- Detailed tool documentation in `docs/` folder
+- Pre-commit hook examples for all tools
+- Configuration file examples
+
+### Breaking Changes
+
+- Version bumped to 2.0.0 to signify new tool suite
+- All tools now versioned together
+
 4.5.1 - 2025-12-16
 ==================
 

@@ -137,7 +137,7 @@ from typing import TypedDict
 import yaml
 
 # Version
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # Default configuration file names
 CONFIG_FILE_NAMES = [".remotesyncrc.yaml", ".remotesyncrc.yml", "remote-sync.config.yaml"]

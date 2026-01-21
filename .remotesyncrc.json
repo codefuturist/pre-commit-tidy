@@ -15,6 +15,13 @@
       "timeout": 30
     }
   },
+  "sync_targets": {
+    "backup": {
+      "path": "/Volumes/Backup/projects/pre-commit-tidy",
+      "exclude": [".git", "__pycache__", "*.pyc", ".DS_Store", "node_modules", ".tox"],
+      "delete": false
+    }
+  },
   "parallel": true,
   "max_workers": 4,
   "offline_queue": true,

@@ -3,6 +3,15 @@
 Provides automated synchronization of git commits across multiple remotes
 with parallel pushing, health checks, divergence detection, and offline queuing.
 
+Features:
+    - Zero-config auto-discovery of git remotes with smart defaults
+    - Parallel pushing to multiple remotes for speed
+    - Offline queue for handling network interruptions gracefully
+    - Smart defaults based on remote type (GitHub, GitLab, etc.)
+    - Backup remote detection with higher retry counts
+    - VPN auto-connect support for corporate remotes
+    - Filesystem and rsync sync targets for local backups
+
 Usage:
     remote-sync [options]
 
@@ -14,6 +23,7 @@ Options:
     --health-check      Check connectivity to all remotes
     --process-queue     Process offline queue of failed pushes
     --clear-queue       Clear the offline queue
+    --sync-targets      Sync to configured filesystem/rsync targets
     --dry-run           Preview changes without executing
     --verbose           Show detailed output
     --quiet             Suppress all output except errors
@@ -24,8 +34,19 @@ Options:
     --help              Show this help message
     --version           Show version number
 
+Smart Defaults:
+    Works out of the box without configuration! Remotes are auto-discovered
+    with intelligent defaults based on:
+
+    - Remote name: origin gets priority 1, upstream priority 2
+    - Remote URL: GitHub, GitLab, Bitbucket detected for optimal settings
+    - Backup patterns: backup-*, mirror-*, etc. get 5+ retries
+    - Force push: blocked by default (safe)
+    - Offline queue: enabled (handles network issues)
+    - Parallel push: enabled (faster)
+
 Configuration:
-    Create a .remotesyncrc.json file in your project root:
+    Optional .remotesyncrc.json file for customization:
 
     {
         "remotes": {
@@ -34,26 +55,25 @@ Configuration:
                 "branches": ["*"],
                 "force_push": "block",
                 "retry": 3,
-                "timeout": 30
+                "timeout": 60
             },
-            "github-mirror": {
-                "priority": 2,
-                "branches": ["main", "develop"],
-                "force_push": "warn"
-            },
-            "backup": {
-                "priority": 3,
+            "backup-nas": {
+                "priority": 10,
                 "branches": ["main"],
                 "retry": 5,
-                "group": "backups"
+                "group": "backup"
             }
+        },
+        "sync_targets": {
+            "local-backup": {"path": "/Volumes/Backup/repos/myproject"},
+            "nas": {"host": "nas.local", "path": "/share/git/myproject", "user": "admin"}
         },
         "parallel": true,
         "max_workers": 4,
         "offline_queue": true,
-        "health_check_timeout": 5,
-        "retry_base_delay": 1.0,
-        "retry_max_delay": 30.0
+        "health_check_timeout": 10,
+        "auto_fetch": true,
+        "fetch_prune": true
     }
 
 Environment Variables:
@@ -93,6 +113,94 @@ QUEUE_FILE = ".remote-sync-queue.json"
 
 # Lock file for queue operations
 QUEUE_LOCK_FILE = ".remote-sync-queue.lock"
+
+# =============================================================================
+# Default Settings - Tuned for Real-World Usage
+# =============================================================================
+
+# Remote defaults
+DEFAULT_REMOTE_PRIORITY = 1
+DEFAULT_REMOTE_BRANCHES = ["*"]  # Sync all branches
+DEFAULT_FORCE_PUSH_POLICY = "block"  # Safe default - prevent accidental force push
+DEFAULT_REMOTE_RETRY = 3  # Retry count for push operations
+DEFAULT_REMOTE_TIMEOUT = 60  # Seconds - increased for large pushes
+DEFAULT_REMOTE_GROUP = "default"
+
+# Parallel execution
+DEFAULT_PARALLEL = True  # Enable parallel pushing for speed
+DEFAULT_MAX_WORKERS = 4  # Conservative for most systems
+
+# Offline queue - handles network interruptions gracefully
+DEFAULT_OFFLINE_QUEUE = True
+DEFAULT_QUEUE_MAX_RETRIES = 10  # Max retries before dropping from queue
+DEFAULT_QUEUE_MAX_AGE_DAYS = 7  # Auto-expire queue items after this many days
+
+# Retry timing with exponential backoff
+DEFAULT_RETRY_BASE_DELAY = 1.0  # Initial delay in seconds
+DEFAULT_RETRY_MAX_DELAY = 60.0  # Cap delay at 60 seconds
+DEFAULT_RETRY_JITTER = 0.1  # 10% jitter to prevent thundering herd
+
+# Health checks
+DEFAULT_HEALTH_CHECK_TIMEOUT = 10  # Seconds - reasonable for most networks
+DEFAULT_HEALTH_CHECK_INTERVAL = 300  # 5 minutes between automatic health checks
+
+# Sync operations
+DEFAULT_AUTO_FETCH = True  # Keep local refs updated before push
+DEFAULT_FETCH_PRUNE = True  # Clean up stale remote-tracking branches
+DEFAULT_PUSH_TAGS = False  # Don't push tags by default (explicit is better)
+
+# VPN defaults
+DEFAULT_VPN_TIMEOUT = 60  # Seconds to wait for VPN connection
+DEFAULT_VPN_AUTO_CONNECT = True  # Auto-connect if remote is unreachable
+
+# Sync targets (filesystem/rsync)
+DEFAULT_SYNC_DELETE = False  # Don't delete extraneous files (safe default)
+DEFAULT_RSYNC_PORT = 22
+DEFAULT_RSYNC_OPTIONS = ["-avz", "--progress"]  # Archive, verbose, compress
+
+# Known hosting providers - used for smart defaults
+KNOWN_HOSTS = {
+    "github.com": {
+        "name": "GitHub",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "gitlab.com": {
+        "name": "GitLab",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "bitbucket.org": {
+        "name": "Bitbucket",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "codeberg.org": {
+        "name": "Codeberg",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
+    },
+    "sr.ht": {
+        "name": "SourceHut",
+        "timeout": 90,  # SourceHut can be slower
+        "retry": 5,
+        "force_push": "warn",
+    },
+}
+
+# Backup remote patterns - auto-detected for higher retry counts
+BACKUP_REMOTE_PATTERNS = [
+    "backup*",
+    "*-backup",
+    "*-mirror",
+    "mirror*",
+    "archive*",
+    "*-archive",
+]
 
 
 class ForcePushPolicy(Enum):
@@ -142,6 +250,31 @@ class VpnConfigDict(TypedDict, total=False):
     auto_connect: bool
 
 
+class FilesystemTargetDict(TypedDict, total=False):
+    """Type definition for filesystem sync target."""
+
+    path: str
+    exclude: list[str]
+    delete: bool  # Delete extraneous files in destination
+    branch_mode: str  # "keep", "match", or "specific"
+    branch: str  # Branch name for "specific" mode
+
+
+class RsyncTargetDict(TypedDict, total=False):
+    """Type definition for rsync sync target."""
+
+    host: str
+    path: str
+    user: str
+    port: int
+    ssh_key: str
+    exclude: list[str]
+    delete: bool
+    options: list[str]  # Additional rsync options
+    branch_mode: str  # "keep", "match", or "specific"
+    branch: str  # Branch name for "specific" mode
+
+
 class RemoteConfigDict(TypedDict, total=False):
     """Type definition for remote configuration."""
 
@@ -167,6 +300,131 @@ class ConfigDict(TypedDict, total=False):
     retry_max_delay: float
     auto_fetch: bool
     vpn: dict[str, VpnConfigDict]  # Named VPN configurations
+    sync_targets: dict[str, FilesystemTargetDict | RsyncTargetDict]  # Filesystem/rsync targets
+    binaries: dict[str, str]  # Custom binary paths (git, rsync, ssh)
+
+
+class SyncTargetType(Enum):
+    """Type of sync target."""
+
+    FILESYSTEM = "filesystem"
+    RSYNC = "rsync"
+
+
+class BranchMode(Enum):
+    """Branch switching mode for sync targets."""
+
+    KEEP = "keep"  # Keep destination on its current branch
+    MATCH = "match"  # Switch destination to same branch as source (default)
+    SPECIFIC = "specific"  # Always use a specific branch
+
+
+# Default excludes for sync targets (does NOT exclude .git to preserve repo state)
+DEFAULT_SYNC_EXCLUDES = ["__pycache__", "*.pyc", ".DS_Store", "*.egg-info", ".tox", ".pytest_cache", "node_modules", ".venv", "venv"]
+
+
+@dataclass
+class FilesystemTarget:
+    """Configuration for a local filesystem sync target."""
+
+    name: str
+    path: str
+    exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
+    delete: bool = DEFAULT_SYNC_DELETE  # Delete extraneous files in destination
+    branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
+    branch: str = ""  # Target branch for "specific" mode
+    target_type: SyncTargetType = SyncTargetType.FILESYSTEM
+
+    @classmethod
+    def from_dict(cls, name: str, data: FilesystemTargetDict) -> FilesystemTarget:
+        """Create from dictionary."""
+        branch_mode_str = data.get("branch_mode", "match")
+        try:
+            branch_mode = BranchMode(branch_mode_str)
+        except ValueError:
+            branch_mode = BranchMode.MATCH
+
+        return cls(
+            name=name,
+            path=data.get("path", ""),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
+            branch_mode=branch_mode,
+            branch=data.get("branch", ""),
+        )
+
+
+@dataclass
+class RsyncTarget:
+    """Configuration for an rsync sync target."""
+
+    name: str
+    host: str
+    path: str
+    user: str = ""
+    port: int = DEFAULT_RSYNC_PORT
+    ssh_key: str = ""
+    exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
+    delete: bool = DEFAULT_SYNC_DELETE
+    options: list[str] = field(default_factory=lambda: DEFAULT_RSYNC_OPTIONS.copy())
+    branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
+    branch: str = ""  # Target branch for "specific" mode
+    target_type: SyncTargetType = SyncTargetType.RSYNC
+
+    @classmethod
+    def from_dict(cls, name: str, data: RsyncTargetDict) -> RsyncTarget:
+        """Create from dictionary."""
+        branch_mode_str = data.get("branch_mode", "match")
+        try:
+            branch_mode = BranchMode(branch_mode_str)
+        except ValueError:
+            branch_mode = BranchMode.MATCH
+
+        # Merge user options with defaults if provided, otherwise use defaults
+        user_options = data.get("options")
+        if user_options is not None:
+            options = user_options  # User explicitly specified, use theirs
+        else:
+            options = DEFAULT_RSYNC_OPTIONS.copy()  # Use sensible defaults
+
+        return cls(
+            name=name,
+            host=data.get("host", ""),
+            path=data.get("path", ""),
+            user=data.get("user", ""),
+            port=data.get("port", DEFAULT_RSYNC_PORT),
+            ssh_key=data.get("ssh_key", ""),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
+            options=options,
+            branch_mode=branch_mode,
+            branch=data.get("branch", ""),
+        )
+
+    def get_rsync_destination(self) -> str:
+        """Get the rsync destination string."""
+        if self.user:
+            return f"{self.user}@{self.host}:{self.path}"
+        return f"{self.host}:{self.path}"
+
+    def get_ssh_host(self) -> str:
+        """Get the SSH host string."""
+        if self.user:
+            return f"{self.user}@{self.host}"
+        return self.host
+
+
+@dataclass
+class SyncTargetResult:
+    """Result of a sync target operation."""
+
+    name: str
+    target_type: SyncTargetType
+    success: bool
+    message: str = ""
+    files_transferred: int = 0
+    bytes_transferred: int = 0
+    duration: float = 0.0
 
 
 @dataclass
@@ -177,8 +435,8 @@ class VpnConfig:
     connect_cmd: str
     disconnect_cmd: str
     check_cmd: str = ""  # Command to check if VPN is connected
-    timeout: int = 30
-    auto_connect: bool = True  # Auto-connect if remote is unreachable
+    timeout: int = DEFAULT_VPN_TIMEOUT
+    auto_connect: bool = DEFAULT_VPN_AUTO_CONNECT
 
     @classmethod
     def from_dict(cls, name: str, data: VpnConfigDict) -> VpnConfig:
@@ -188,8 +446,8 @@ class VpnConfig:
             connect_cmd=data.get("connect_cmd", ""),
             disconnect_cmd=data.get("disconnect_cmd", ""),
             check_cmd=data.get("check_cmd", ""),
-            timeout=data.get("timeout", 30),
-            auto_connect=data.get("auto_connect", True),
+            timeout=data.get("timeout", DEFAULT_VPN_TIMEOUT),
+            auto_connect=data.get("auto_connect", DEFAULT_VPN_AUTO_CONNECT),
         )
 
 
@@ -198,19 +456,19 @@ class RemoteConfig:
     """Configuration for a single remote."""
 
     name: str
-    priority: int = 1
-    branches: list[str] = field(default_factory=lambda: ["*"])
+    priority: int = DEFAULT_REMOTE_PRIORITY
+    branches: list[str] = field(default_factory=lambda: DEFAULT_REMOTE_BRANCHES.copy())
     force_push: ForcePushPolicy = ForcePushPolicy.BLOCK
-    retry: int = 3
-    timeout: int = 30
-    group: str = "default"
+    retry: int = DEFAULT_REMOTE_RETRY
+    timeout: int = DEFAULT_REMOTE_TIMEOUT
+    group: str = DEFAULT_REMOTE_GROUP
     url: str | None = None
     vpn: str | None = None  # VPN name to use for this remote
 
     @classmethod
     def from_dict(cls, name: str, data: RemoteConfigDict) -> RemoteConfig:
         """Create from dictionary."""
-        force_push_str = data.get("force_push", "block")
+        force_push_str = data.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
         try:
             force_push = ForcePushPolicy(force_push_str)
         except ValueError:
@@ -227,15 +485,44 @@ class RemoteConfig:
 
         return cls(
             name=name,
-            priority=data.get("priority", 1),
-            branches=data.get("branches", ["*"]),
+            priority=data.get("priority", DEFAULT_REMOTE_PRIORITY),
+            branches=data.get("branches", DEFAULT_REMOTE_BRANCHES.copy()),
             force_push=force_push,
-            retry=data.get("retry", 3),
-            timeout=data.get("timeout", 30),
-            group=data.get("group", "default"),
+            retry=data.get("retry", DEFAULT_REMOTE_RETRY),
+            timeout=data.get("timeout", DEFAULT_REMOTE_TIMEOUT),
+            group=data.get("group", DEFAULT_REMOTE_GROUP),
             url=data.get("url"),
             vpn=vpn_name,
         )
+
+    @classmethod
+    def from_url(cls, name: str, url: str) -> RemoteConfig:
+        """Create with smart defaults based on URL analysis."""
+        config = cls(name=name, url=url)
+
+        # Detect known hosting providers
+        for host_pattern, host_config in KNOWN_HOSTS.items():
+            if host_pattern in url:
+                config.timeout = host_config.get("timeout", DEFAULT_REMOTE_TIMEOUT)
+                config.retry = host_config.get("retry", DEFAULT_REMOTE_RETRY)
+                force_push_str = host_config.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
+                config.force_push = ForcePushPolicy(force_push_str)
+                break
+
+        # Detect backup remotes - give them higher retry counts
+        for pattern in BACKUP_REMOTE_PATTERNS:
+            if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                config.retry = max(config.retry, 5)  # At least 5 retries for backups
+                config.group = "backup"
+                break
+
+        # Give origin highest priority
+        if name == "origin":
+            config.priority = 1
+        elif name == "upstream":
+            config.priority = 2
+
+        return config
 
 
 @dataclass
@@ -244,22 +531,33 @@ class SyncConfig:
 
     remotes: dict[str, RemoteConfig] = field(default_factory=dict)
     vpn_configs: dict[str, VpnConfig] = field(default_factory=dict)
-    parallel: bool = True
-    max_workers: int = 4
-    offline_queue: bool = True
-    health_check_timeout: int = 5
-    retry_base_delay: float = 1.0
-    retry_max_delay: float = 30.0
-    auto_fetch: bool = True
+    sync_targets: dict[str, FilesystemTarget | RsyncTarget] = field(default_factory=dict)
+    parallel: bool = DEFAULT_PARALLEL
+    max_workers: int = DEFAULT_MAX_WORKERS
+    offline_queue: bool = DEFAULT_OFFLINE_QUEUE
+    health_check_timeout: int = DEFAULT_HEALTH_CHECK_TIMEOUT
+    retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY
+    retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY
+    auto_fetch: bool = DEFAULT_AUTO_FETCH
+    fetch_prune: bool = DEFAULT_FETCH_PRUNE
+    push_tags: bool = DEFAULT_PUSH_TAGS
+    queue_max_retries: int = DEFAULT_QUEUE_MAX_RETRIES
+    queue_max_age_days: int = DEFAULT_QUEUE_MAX_AGE_DAYS
     dry_run: bool = False
     verbose: bool = False
     quiet: bool = False
+    binaries: dict[str, str] = field(default_factory=lambda: {
+        "git": "git",
+        "rsync": "rsync",
+        "ssh": "ssh",
+    })
 
     @classmethod
     def from_dict(cls, data: ConfigDict) -> SyncConfig:
         """Create from dictionary."""
         remotes = {}
         vpn_configs = {}
+        sync_targets: dict[str, FilesystemTarget | RsyncTarget] = {}
 
         # Parse global VPN configurations
         for vpn_name, vpn_data in data.get("vpn", {}).items():
@@ -275,16 +573,36 @@ class SyncConfig:
                 inline_vpn_name = f"_inline_{name}"
                 vpn_configs[inline_vpn_name] = VpnConfig.from_dict(inline_vpn_name, vpn_value)
 
+        # Parse sync targets (filesystem and rsync)
+        for name, target_data in data.get("sync_targets", {}).items():
+            if "host" in target_data:
+                # It's an rsync target
+                sync_targets[name] = RsyncTarget.from_dict(name, target_data)  # type: ignore
+            else:
+                # It's a filesystem target
+                sync_targets[name] = FilesystemTarget.from_dict(name, target_data)  # type: ignore
+
+        # Parse custom binary paths
+        default_binaries = {"git": "git", "rsync": "rsync", "ssh": "ssh"}
+        binaries = default_binaries.copy()
+        binaries.update(data.get("binaries", {}))
+
         return cls(
             remotes=remotes,
             vpn_configs=vpn_configs,
-            parallel=data.get("parallel", True),
-            max_workers=data.get("max_workers", 4),
-            offline_queue=data.get("offline_queue", True),
-            health_check_timeout=data.get("health_check_timeout", 5),
-            retry_base_delay=data.get("retry_base_delay", 1.0),
-            retry_max_delay=data.get("retry_max_delay", 30.0),
-            auto_fetch=data.get("auto_fetch", True),
+            sync_targets=sync_targets,
+            parallel=data.get("parallel", DEFAULT_PARALLEL),
+            max_workers=data.get("max_workers", DEFAULT_MAX_WORKERS),
+            offline_queue=data.get("offline_queue", DEFAULT_OFFLINE_QUEUE),
+            health_check_timeout=data.get("health_check_timeout", DEFAULT_HEALTH_CHECK_TIMEOUT),
+            retry_base_delay=data.get("retry_base_delay", DEFAULT_RETRY_BASE_DELAY),
+            retry_max_delay=data.get("retry_max_delay", DEFAULT_RETRY_MAX_DELAY),
+            auto_fetch=data.get("auto_fetch", DEFAULT_AUTO_FETCH),
+            fetch_prune=data.get("fetch_prune", DEFAULT_FETCH_PRUNE),
+            push_tags=data.get("push_tags", DEFAULT_PUSH_TAGS),
+            queue_max_retries=data.get("queue_max_retries", DEFAULT_QUEUE_MAX_RETRIES),
+            queue_max_age_days=data.get("queue_max_age_days", DEFAULT_QUEUE_MAX_AGE_DAYS),
+            binaries=binaries,
         )
 
 
@@ -499,6 +817,36 @@ class Logger:
 # Global logger instance
 logger = Logger()
 
+# Global config instance (set during initialization)
+_global_config: SyncConfig | None = None
+
+
+def set_global_config(config: SyncConfig) -> None:
+    """Set the global config instance."""
+    global _global_config
+    _global_config = config
+
+
+def get_git_binary() -> str:
+    """Get the git binary path from config."""
+    if _global_config and "git" in _global_config.binaries:
+        return _global_config.binaries["git"]
+    return "git"
+
+
+def get_rsync_binary() -> str:
+    """Get the rsync binary path from config."""
+    if _global_config and "rsync" in _global_config.binaries:
+        return _global_config.binaries["rsync"]
+    return "rsync"
+
+
+def get_ssh_binary() -> str:
+    """Get the ssh binary path from config."""
+    if _global_config and "ssh" in _global_config.binaries:
+        return _global_config.binaries["ssh"]
+    return "ssh"
+
 
 def run_git_command(
     args: list[str],
@@ -506,7 +854,7 @@ def run_git_command(
     capture_output: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
-    cmd = ["git"] + args
+    cmd = [get_git_binary()] + args
     try:
         result = subprocess.run(
             cmd,
@@ -703,7 +1051,12 @@ def merge_configs(*configs: ConfigDict) -> ConfigDict:
 
 
 def discover_remotes(config: SyncConfig) -> SyncConfig:
-    """Auto-discover remotes if none configured."""
+    """Auto-discover remotes if none configured.
+
+    Uses smart defaults based on:
+    - Remote name (origin, upstream, backup-*, etc.)
+    - Remote URL (GitHub, GitLab, Bitbucket, etc.)
+    """
     if config.remotes:
         return config
 
@@ -712,18 +1065,35 @@ def discover_remotes(config: SyncConfig) -> SyncConfig:
     if not git_remotes:
         return config
 
-    # Create default configuration for each remote
+    # Create smart configuration for each remote
     for i, remote in enumerate(git_remotes):
         url = get_remote_url(remote)
-        # Give origin highest priority
-        priority = 1 if remote == "origin" else i + 2
-        config.remotes[remote] = RemoteConfig(
-            name=remote,
-            priority=priority,
-            branches=["*"],
-            force_push=ForcePushPolicy.BLOCK,
-            url=url,
-        )
+
+        if url:
+            # Use smart defaults based on URL analysis
+            remote_config = RemoteConfig.from_url(remote, url)
+        else:
+            # Basic config if we can't get the URL
+            remote_config = RemoteConfig(name=remote)
+
+        # Set priority based on remote name and position
+        if remote == "origin":
+            remote_config.priority = 1
+        elif remote == "upstream":
+            remote_config.priority = 2
+        else:
+            # Other remotes get lower priority
+            remote_config.priority = i + 10
+
+        config.remotes[remote] = remote_config
+
+        if config.verbose:
+            host_info = ""
+            for host_pattern, host_data in KNOWN_HOSTS.items():
+                if url and host_pattern in url:
+                    host_info = f" ({host_data['name']})"
+                    break
+            logger.debug(f"Discovered remote: {remote}{host_info}")
 
     return config
 
@@ -1015,6 +1385,644 @@ class VpnContext:
         if self.vpn_config and self.connected and not self.was_already_connected:
             disconnect_vpn(self.vpn_config, self.dry_run)
         return None
+
+
+# =============================================================================
+# Filesystem and Rsync Sync Functions
+# =============================================================================
+
+
+def get_repo_root() -> Path | None:
+    """Get the root directory of the git repository."""
+    result = run_git_command(["rev-parse", "--show-toplevel"])
+    if result.returncode == 0:
+        return Path(result.stdout.strip())
+    return None
+
+
+def get_current_branch(repo_path: Path | None = None) -> str | None:
+    """Get the current branch name of a git repository."""
+    if repo_path is None:
+        result = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+    else:
+        result = subprocess.run(
+            [get_git_binary(), "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    if result.returncode == 0:
+        branch = result.stdout.strip()
+        return branch if branch != "HEAD" else None  # Detached HEAD
+    return None
+
+
+def is_git_repo(path: Path) -> bool:
+    """Check if a path is a git repository."""
+    git_dir = path / ".git"
+    return git_dir.exists() and (git_dir.is_dir() or git_dir.is_file())
+
+
+def switch_branch_at_path(
+    repo_path: Path,
+    branch: str,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Switch to a branch at a local git repository path.
+    
+    Returns (success, message).
+    """
+    if not is_git_repo(repo_path):
+        return False, f"Not a git repository: {repo_path}"
+
+    if dry_run:
+        return True, f"[DRY RUN] Would switch to branch '{branch}' at {repo_path}"
+
+    git_bin = get_git_binary()
+
+    # First, try to checkout the branch
+    result = subprocess.run(
+        [git_bin, "-C", str(repo_path), "checkout", branch],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    if result.returncode == 0:
+        return True, f"Switched to branch '{branch}'"
+
+    # If checkout failed, maybe branch doesn't exist locally - try to fetch and checkout
+    # First check if this is a tracking branch issue
+    if "did not match any file" in result.stderr or "pathspec" in result.stderr:
+        # Try to create tracking branch from origin
+        fetch_result = subprocess.run(
+            [git_bin, "-C", str(repo_path), "fetch", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        # Try checkout again after fetch
+        result = subprocess.run(
+            [git_bin, "-C", str(repo_path), "checkout", branch],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            return True, f"Fetched and switched to branch '{branch}'"
+
+        # Try creating a new tracking branch
+        result = subprocess.run(
+            [git_bin, "-C", str(repo_path), "checkout", "-b", branch, f"origin/{branch}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            return True, f"Created tracking branch '{branch}'"
+
+    return False, f"Failed to switch to branch '{branch}': {result.stderr.strip()}"
+
+
+def switch_branch_via_ssh(
+    target: RsyncTarget,
+    branch: str,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Switch to a branch at a remote git repository via SSH.
+    
+    Returns (success, message).
+    """
+    if dry_run:
+        return True, f"[DRY RUN] Would switch to branch '{branch}' at {target.get_rsync_destination()}"
+
+    # Build SSH command
+    ssh_cmd = [get_ssh_binary()]
+    if target.port != 22:
+        ssh_cmd.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd.extend(["-i", str(key_path)])
+
+    ssh_cmd.append(target.get_ssh_host())
+
+    # Command to run on remote - check if git repo and switch branch
+    remote_cmd = f"""
+        cd "{target.path}" && \
+        if [ -d .git ] || [ -f .git ]; then \
+            git checkout "{branch}" 2>/dev/null || \
+            (git fetch --all && git checkout "{branch}") 2>/dev/null || \
+            git checkout -b "{branch}" "origin/{branch}" 2>/dev/null; \
+            echo "BRANCH_SWITCHED"; \
+        else \
+            echo "NOT_A_GIT_REPO"; \
+        fi
+    """
+    ssh_cmd.append(remote_cmd)
+
+    try:
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        if "BRANCH_SWITCHED" in result.stdout:
+            return True, f"Switched remote to branch '{branch}'"
+        elif "NOT_A_GIT_REPO" in result.stdout:
+            return False, f"Remote path is not a git repository: {target.path}"
+        else:
+            return False, f"Failed to switch branch: {result.stderr.strip()}"
+
+    except subprocess.TimeoutExpired:
+        return False, "SSH command timed out"
+    except Exception as e:
+        return False, f"SSH error: {e}"
+
+
+def get_target_branch(
+    target: FilesystemTarget | RsyncTarget,
+    source_branch: str | None = None,
+) -> str | None:
+    """Determine the target branch based on branch_mode configuration."""
+    if target.branch_mode == BranchMode.KEEP:
+        return None  # Don't change branch
+    elif target.branch_mode == BranchMode.MATCH:
+        return source_branch  # Use same branch as source
+    elif target.branch_mode == BranchMode.SPECIFIC:
+        return target.branch if target.branch else None
+    return None
+
+
+def sync_to_filesystem(
+    target: FilesystemTarget,
+    source_dir: Path | None = None,
+    dry_run: bool = False,
+) -> SyncTargetResult:
+    """Sync repository to a local filesystem location using rsync."""
+    start_time = time.time()
+    branch_message = ""
+
+    # Get source directory (repo root)
+    if source_dir is None:
+        source_dir = get_repo_root()
+        if source_dir is None:
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=False,
+                message="Could not determine repository root",
+            )
+
+    dest_path = Path(target.path).expanduser().resolve()
+
+    # Validate destination
+    if not dest_path.parent.exists():
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message=f"Parent directory does not exist: {dest_path.parent}",
+        )
+
+    # Handle branch switching if destination is a git repo
+    target_branch = get_target_branch(target, get_current_branch())
+    if target_branch and dest_path.exists() and is_git_repo(dest_path):
+        current_dest_branch = get_current_branch(dest_path)
+        if current_dest_branch != target_branch:
+            success, branch_message = switch_branch_at_path(dest_path, target_branch, dry_run)
+            if not success and target.branch_mode != BranchMode.KEEP:
+                logger.warning(f"Branch switch failed: {branch_message}")
+            elif success:
+                logger.info(f"📌 {branch_message}")
+                branch_message = f" (branch: {target_branch})"
+
+    if dry_run:
+        dry_run_msg = f"[DRY RUN] Would sync to {dest_path}"
+        if target_branch:
+            dry_run_msg += f" on branch '{target_branch}'"
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=True,
+            message=dry_run_msg,
+        )
+
+    # Build rsync command for local sync
+    rsync_cmd = [get_rsync_binary(), "-av", "--progress"]
+
+    # Add delete flag if requested
+    if target.delete:
+        rsync_cmd.append("--delete")
+
+    # Add exclude patterns
+    for pattern in target.exclude:
+        rsync_cmd.extend(["--exclude", pattern])
+
+    # Source and destination (trailing slash on source is important)
+    rsync_cmd.append(f"{source_dir}/")
+    rsync_cmd.append(str(dest_path))
+
+    logger.info(f"Syncing to filesystem: {dest_path}")
+    logger.debug(f"Command: {' '.join(rsync_cmd)}")
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+            check=False,
+        )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            # Parse rsync output for stats
+            files_transferred = 0
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
+                    try:
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
+                    except (IndexError, ValueError):
+                        pass
+
+            logger.success(f"Synced to {dest_path} in {duration:.1f}s")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=True,
+                message=f"Successfully synced to {dest_path}{branch_message}",
+                files_transferred=files_transferred,
+                duration=round(duration, 2),
+            )
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            logger.error(f"Filesystem sync failed: {error_msg}")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=False,
+                message=error_msg,
+                duration=round(duration, 2),
+            )
+
+    except subprocess.TimeoutExpired:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message="Sync timed out after 5 minutes",
+            duration=300.0,
+        )
+    except FileNotFoundError:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message="rsync command not found. Please install rsync.",
+        )
+    except Exception as e:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message=str(e),
+        )
+
+
+def sync_to_rsync(
+    target: RsyncTarget,
+    source_dir: Path | None = None,
+    dry_run: bool = False,
+) -> SyncTargetResult:
+    """Sync repository to a remote host using rsync over SSH."""
+    start_time = time.time()
+    branch_message = ""
+
+    # Get source directory (repo root)
+    if source_dir is None:
+        source_dir = get_repo_root()
+        if source_dir is None:
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=False,
+                message="Could not determine repository root",
+            )
+
+    if not target.host:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="No host specified for rsync target",
+        )
+
+    if not target.path:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="No path specified for rsync target",
+        )
+
+    # Handle branch switching via SSH if configured
+    target_branch = get_target_branch(target, get_current_branch())
+    if target_branch:
+        success, branch_msg = switch_branch_via_ssh(target, target_branch, dry_run)
+        if success:
+            logger.info(f"📌 {branch_msg}")
+            branch_message = f" (branch: {target_branch})"
+        elif target.branch_mode != BranchMode.KEEP:
+            logger.warning(f"Branch switch failed: {branch_msg}")
+
+    if dry_run:
+        dest = target.get_rsync_destination()
+        dry_run_msg = f"[DRY RUN] Would rsync to {dest}"
+        if target_branch:
+            dry_run_msg += f" on branch '{target_branch}'"
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=True,
+            message=dry_run_msg,
+        )
+
+    # Build rsync command
+    rsync_cmd = [get_rsync_binary(), "-avz", "--progress"]
+
+    # Build SSH command with options
+    ssh_cmd_parts = [get_ssh_binary()]
+    if target.port != 22:
+        ssh_cmd_parts.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd_parts.extend(["-i", str(key_path)])
+
+    if len(ssh_cmd_parts) > 1:
+        rsync_cmd.extend(["-e", " ".join(ssh_cmd_parts)])
+
+    # Add delete flag if requested
+    if target.delete:
+        rsync_cmd.append("--delete")
+
+    # Add exclude patterns
+    for pattern in target.exclude:
+        rsync_cmd.extend(["--exclude", pattern])
+
+    # Add custom options
+    rsync_cmd.extend(target.options)
+
+    # Source and destination
+    rsync_cmd.append(f"{source_dir}/")
+    rsync_cmd.append(target.get_rsync_destination())
+
+    dest = target.get_rsync_destination()
+    logger.info(f"Syncing via rsync to: {dest}")
+    logger.debug(f"Command: {' '.join(rsync_cmd)}")
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout for remote sync
+            check=False,
+        )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            # Parse rsync output for stats
+            files_transferred = 0
+            bytes_transferred = 0
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
+                    try:
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
+                    except (IndexError, ValueError):
+                        pass
+                if "total size" in line.lower():
+                    try:
+                        # Parse "total size is X" format
+                        size_str = line.split("is")[1].strip().split()[0].replace(",", "")
+                        bytes_transferred = int(size_str)
+                    except (IndexError, ValueError):
+                        pass
+
+            logger.success(f"Rsync to {dest} completed in {duration:.1f}s")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=True,
+                message=f"Successfully synced to {dest}{branch_message}",
+                files_transferred=files_transferred,
+                bytes_transferred=bytes_transferred,
+                duration=round(duration, 2),
+            )
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            logger.error(f"Rsync failed: {error_msg}")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=False,
+                message=error_msg,
+                duration=round(duration, 2),
+            )
+
+    except subprocess.TimeoutExpired:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="Rsync timed out after 10 minutes",
+            duration=600.0,
+        )
+    except FileNotFoundError:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="rsync command not found. Please install rsync.",
+        )
+    except Exception as e:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message=str(e),
+        )
+
+
+def check_rsync_target_health(target: RsyncTarget, timeout: int = 10) -> HealthCheckResult:
+    """Check if an rsync target is reachable via SSH."""
+    start_time = time.time()
+
+    # Build SSH command to test connectivity
+    ssh_cmd = [get_ssh_binary(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+    if target.port != 22:
+        ssh_cmd.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd.extend(["-i", str(key_path)])
+
+    host = f"{target.user}@{target.host}" if target.user else target.host
+    ssh_cmd.extend([host, "echo", "ok"])
+
+    try:
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        latency = (time.time() - start_time) * 1000
+
+        if result.returncode == 0:
+            return HealthCheckResult(
+                remote=target.name,
+                status=RemoteStatus.REACHABLE,
+                url=target.get_rsync_destination(),
+                latency_ms=round(latency, 2),
+            )
+        else:
+            return HealthCheckResult(
+                remote=target.name,
+                status=RemoteStatus.UNREACHABLE,
+                url=target.get_rsync_destination(),
+                latency_ms=round(latency, 2),
+                error=result.stderr.strip() or "SSH connection failed",
+            )
+    except subprocess.TimeoutExpired:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=target.get_rsync_destination(),
+            error=f"Connection timed out after {timeout}s",
+        )
+    except Exception as e:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=target.get_rsync_destination(),
+            error=str(e),
+        )
+
+
+def check_filesystem_target_health(target: FilesystemTarget) -> HealthCheckResult:
+    """Check if a filesystem target is accessible."""
+    start_time = time.time()
+    dest_path = Path(target.path).expanduser().resolve()
+
+    # Check if path exists or parent exists (for new syncs)
+    if dest_path.exists():
+        latency = (time.time() - start_time) * 1000
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.REACHABLE,
+            url=str(dest_path),
+            latency_ms=round(latency, 2),
+        )
+    elif dest_path.parent.exists():
+        latency = (time.time() - start_time) * 1000
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.REACHABLE,
+            url=str(dest_path),
+            latency_ms=round(latency, 2),
+            error="Target doesn't exist but parent directory is accessible",
+        )
+    else:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=str(dest_path),
+            error=f"Path not accessible: {dest_path}",
+        )
+
+
+def sync_to_targets(
+    config: SyncConfig,
+    targets: list[str] | None = None,
+) -> list[SyncTargetResult]:
+    """Sync to all configured sync targets (filesystem and rsync)."""
+    results: list[SyncTargetResult] = []
+
+    if not config.sync_targets:
+        logger.info("No sync targets configured")
+        return results
+
+    # Filter targets if specified
+    target_names = targets or list(config.sync_targets.keys())
+
+    for name in target_names:
+        target = config.sync_targets.get(name)
+        if target is None:
+            logger.warning(f"Sync target '{name}' not found")
+            continue
+
+        if isinstance(target, FilesystemTarget):
+            result = sync_to_filesystem(target, dry_run=config.dry_run)
+        elif isinstance(target, RsyncTarget):
+            result = sync_to_rsync(target, dry_run=config.dry_run)
+        else:
+            logger.warning(f"Unknown target type for '{name}'")
+            continue
+
+        results.append(result)
+
+    return results
+
+
+def print_sync_target_results(results: list[SyncTargetResult], dry_run: bool = False) -> None:
+    """Print sync target results in a nice format."""
+    if dry_run:
+        logger.header("[DRY RUN] Sync Target Results")
+    else:
+        logger.header("Sync Target Results")
+
+    for result in results:
+        if result.success:
+            icon = "✓"
+            color = Colors.GREEN
+        else:
+            icon = "✗"
+            color = Colors.RED
+
+        type_label = "📁" if result.target_type == SyncTargetType.FILESYSTEM else "🔄"
+
+        print(f"  {color}{icon}{Colors.RESET} {type_label} {Colors.BOLD}{result.name}{Colors.RESET}")
+        print(f"    {result.message}")
+        if result.duration > 0:
+            print(f"    {Colors.DIM}Duration: {result.duration:.2f}s{Colors.RESET}")
+        if result.files_transferred > 0:
+            print(f"    {Colors.DIM}Files: {result.files_transferred}{Colors.RESET}")
+        if result.bytes_transferred > 0:
+            size_mb = result.bytes_transferred / (1024 * 1024)
+            print(f"    {Colors.DIM}Size: {size_mb:.2f} MB{Colors.RESET}")
+        print()
+
+    # Summary
+    success_count = sum(1 for r in results if r.success)
+    failed_count = sum(1 for r in results if not r.success)
+    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end="")
+    print(f"{Colors.GREEN}{success_count} succeeded{Colors.RESET}, ", end="")
+    print(f"{Colors.RED}{failed_count} failed{Colors.RESET}")
 
 
 def check_remote_health(
@@ -1551,12 +2559,18 @@ Examples:
   remote-sync --health-check         Check connectivity to all remotes
   remote-sync --process-queue        Retry failed pushes from queue
   remote-sync --push --dry-run       Preview what would be pushed
+  remote-sync --sync-targets         Sync to filesystem/rsync targets
+  remote-sync --sync-targets --target backup-nas  Sync to specific target
 
 Configuration file (.remotesyncrc.json):
   {
     "remotes": {
       "origin": {"priority": 1, "branches": ["*"], "force_push": "block"},
       "mirror": {"priority": 2, "branches": ["main"], "force_push": "warn"}
+    },
+    "sync_targets": {
+      "backup-drive": {"path": "/Volumes/Backup/repos/myproject"},
+      "nas-server": {"host": "nas.local", "path": "/share/repos/myproject", "user": "admin"}
     },
     "parallel": true,
     "offline_queue": true
@@ -1584,7 +2598,7 @@ Configuration file (.remotesyncrc.json):
     action_group.add_argument(
         "--health-check",
         action="store_true",
-        help="Check connectivity to all remotes",
+        help="Check connectivity to all remotes and sync targets",
     )
     action_group.add_argument(
         "--process-queue",
@@ -1601,6 +2615,16 @@ Configuration file (.remotesyncrc.json):
         action="store_true",
         help="Show offline queue contents",
     )
+    action_group.add_argument(
+        "--sync-targets",
+        action="store_true",
+        help="Sync to configured filesystem/rsync targets",
+    )
+    action_group.add_argument(
+        "--sync-all",
+        action="store_true",
+        help="Push to remotes AND sync to targets",
+    )
 
     # Options
     parser.add_argument(
@@ -1614,6 +2638,12 @@ Configuration file (.remotesyncrc.json):
         type=str,
         metavar="NAME",
         help="Target specific remote(s), comma-separated",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        metavar="NAME",
+        help="Target specific sync target(s), comma-separated",
     )
     parser.add_argument(
         "--branch",
@@ -1678,6 +2708,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_parallel:
         config.parallel = False
 
+    # Set global config for binary paths
+    set_global_config(config)
+
     # Auto-discover remotes if none configured
     config = discover_remotes(config)
 
@@ -1699,6 +2732,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.health_check:
         results = check_all_remotes_health(config)
         print_health_check_results(results)
+        
+        # Also check sync targets if configured
+        if config.sync_targets:
+            logger.info("\n📁 Sync Target Health:")
+            for target in config.sync_targets:
+                if target.type == SyncTargetType.FILESYSTEM:
+                    healthy = check_filesystem_target_health(target)
+                    status = "✅" if healthy else "❌"
+                    logger.info(f"  {status} {target.name} → {target.path}")
+                elif target.type == SyncTargetType.RSYNC:
+                    healthy = check_rsync_target_health(target)
+                    status = "✅" if healthy else "❌"
+                    logger.info(f"  {status} {target.name} → {target.host}:{target.path}")
+        
         # Return error if any remote is unreachable
         unreachable = [r for r in results if r.status == RemoteStatus.UNREACHABLE]
         return 1 if unreachable else 0
@@ -1738,6 +2785,20 @@ def main(argv: list[str] | None = None) -> int:
         queue = load_queue()
         print_queue_status(queue)
         return 0
+
+    elif args.sync_targets or args.sync_all:
+        # Parse target names
+        target_names = None
+        if args.target:
+            target_names = [t.strip() for t in args.target.split(",")]
+        
+        # Sync to configured sync targets (filesystem/rsync)
+        results = sync_to_targets(config, target_names)
+        print_sync_target_results(results, dry_run=config.dry_run)
+        
+        # Return error if any sync failed
+        failed = [r for r in results if not r.success]
+        return 1 if failed else 0
 
     else:
         # Default: show status

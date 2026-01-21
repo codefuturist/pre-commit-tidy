@@ -228,6 +228,9 @@ Create a `.remotesyncrc.json` file in your project root:
 | **Sync Dashboard** | Visual status of all remotes (ahead/behind/diverged) |
 | **Auto-Discovery** | Automatically detect configured git remotes |
 | **VPN Support** | Auto-connect VPN for remotes behind firewalls |
+| **Filesystem Sync** | Sync to local paths (external drives, NAS) via rsync |
+| **Rsync Targets** | Sync to remote servers via SSH + rsync |
+| **Branch Switching** | Auto-switch destination branches (match source or specific) |
 
 ### Remote Configuration Options
 
@@ -335,6 +338,137 @@ For remotes behind firewalls or on private networks, configure VPN auto-connecti
 }
 ```
 
+### Filesystem & Rsync Sync Targets
+
+In addition to git remotes, you can sync your repository to local filesystem paths or remote servers via rsync. This is useful for:
+- **Local backups**: External drives, NAS, other directories
+- **Remote backups**: Servers accessible via SSH
+- **Non-git destinations**: Deployment targets, shared folders
+
+#### Smart Defaults
+
+The sync targets use sensible defaults optimized for keeping git repos in sync:
+
+| Setting | Default | Rationale |
+|---------|---------|-----------|
+| `branch_mode` | `"match"` | Destination follows source branch automatically |
+| `exclude` | Common build artifacts | `.git` is **NOT** excluded to preserve git history |
+| `delete` | `false` | Safe default - won't delete extra files at destination |
+
+**Default excludes**: `__pycache__`, `*.pyc`, `.DS_Store`, `*.egg-info`, `.tox`, `.pytest_cache`, `node_modules`, `.venv`, `venv`
+
+For deployment (non-git) targets, explicitly exclude `.git`:
+```json
+{
+    "exclude": [".git", ".env", "node_modules"]
+}
+```
+
+#### Configuration
+
+Add `sync_targets` to your `.remotesyncrc.json`:
+
+```json
+{
+    "sync_targets": {
+        "backup": {
+            "path": "/Volumes/Backup/projects/my-repo"
+        },
+        "nas": {
+            "path": "/mnt/nas/backups/my-repo",
+            "delete": true
+        },
+        "deploy-server": {
+            "host": "deploy.example.com",
+            "path": "/var/www/my-app",
+            "user": "deploy",
+            "ssh_key": "~/.ssh/deploy_key",
+            "exclude": [".git", ".env", "node_modules"],
+            "branch_mode": "specific",
+            "branch": "main",
+            "delete": true
+        }
+    }
+}
+```
+
+#### Filesystem Target Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `path` | string | required | Local destination path |
+| `exclude` | list | `["__pycache__", "*.pyc", ...]` | Patterns to exclude (`.git` NOT excluded) |
+| `delete` | bool | `false` | Delete files not in source |
+| `branch_mode` | string | `"match"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch` | string | `""` | Target branch (for `"specific"` mode) |
+
+#### Rsync Target Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `host` | string | required | Remote hostname |
+| `path` | string | required | Remote destination path |
+| `user` | string | `""` | SSH username |
+| `port` | int | `22` | SSH port |
+| `ssh_key` | string | `""` | Path to SSH private key |
+| `exclude` | list | `["__pycache__", "*.pyc", ...]` | Patterns to exclude (`.git` NOT excluded) |
+| `delete` | bool | `false` | Delete files not in source |
+| `options` | list | `[]` | Additional rsync options |
+| `branch_mode` | string | `"match"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch` | string | `""` | Target branch (for `"specific"` mode) |
+
+#### Branch Switching Modes
+
+When syncing to destinations that are git repositories, you can control branch switching:
+
+| Mode | Description |
+|------|-------------|
+| `keep` | Keep destination on its current branch (default) |
+| `match` | Switch destination to same branch as source |
+| `specific` | Always use a specific branch |
+
+**Example: Match source branch**
+```json
+{
+    "sync_targets": {
+        "backup": {
+            "path": "/backup/my-repo",
+            "branch_mode": "match"
+        }
+    }
+}
+```
+
+**Example: Always use main branch**
+```json
+{
+    "sync_targets": {
+        "production": {
+            "host": "deploy.example.com",
+            "path": "/var/www/app",
+            "branch_mode": "specific",
+            "branch": "main"
+        }
+    }
+}
+```
+
+#### Usage
+
+```bash
+# Sync to all configured sync targets
+remote-sync --sync-targets
+
+# Sync to specific targets
+remote-sync --sync-targets --target backup,nas
+
+# Sync everything (remotes + targets)
+remote-sync --sync-all
+
+# Preview sync with dry-run
+remote-sync --sync-targets --dry-run
+```
+
 ### CLI Options
 
 ```
@@ -348,10 +482,13 @@ Actions (mutually exclusive):
   --process-queue     Process offline queue of failed pushes
   --clear-queue       Clear the offline queue
   --show-queue        Show offline queue contents
+  --sync-targets      Sync to filesystem/rsync targets
+  --sync-all          Sync to all remotes AND sync targets
 
 Options:
   --config PATH       Path to configuration file
   --remote NAME       Target specific remote(s), comma-separated
+  --target NAME       Target specific sync target(s), comma-separated
   --branch NAME       Target specific branch (default: current)
   --force             Allow force push (requires explicit flag)
   --no-parallel       Disable parallel pushing
@@ -371,6 +508,42 @@ Options:
 | `REMOTE_SYNC_VERBOSE` | Set to `true` for verbose output |
 | `REMOTE_SYNC_OFFLINE_QUEUE` | Set to `true`/`false` to enable/disable queue |
 | `REMOTE_SYNC_MAX_WORKERS` | Maximum parallel workers (default: 4) |
+
+### Custom Binary Paths
+
+If you need to use custom paths for system binaries (e.g., different versions or non-standard locations), you can configure them:
+
+**For remote-sync** (`.remotesyncrc.json`):
+```json
+{
+    "binaries": {
+        "git": "/opt/homebrew/bin/git",
+        "rsync": "/usr/local/bin/rsync",
+        "ssh": "/usr/bin/ssh"
+    }
+}
+```
+
+**For binary-track** (`.binariesrc.json`):
+```json
+{
+    "system_binaries": {
+        "git": "/opt/homebrew/bin/git",
+        "codesign": "/usr/local/bin/codesign"
+    }
+}
+```
+
+**Supported binaries:**
+- **remote-sync**: `git`, `rsync`, `ssh`
+- **binary-track**: `git`, `codesign`
+
+This is useful when:
+- Using a specific Git version for features/compatibility
+- Running in containerized environments with custom paths
+- Using alternative SSH implementations (e.g., Dropbear)
+- rsync installed via Homebrew or custom location
+- Using custom codesign implementations on macOS
 
 ### Pre-commit Hook Integration
 

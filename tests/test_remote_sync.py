@@ -11,7 +11,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pre_commit.remote_sync import (
+    BranchMode,
     ConfigDict,
+    FilesystemTarget,
     ForcePushPolicy,
     HealthCheckResult,
     OfflineQueue,
@@ -20,21 +22,28 @@ from pre_commit.remote_sync import (
     QueuedPush,
     RemoteConfig,
     RemoteStatus,
+    RsyncTarget,
     SyncConfig,
     SyncState,
     SyncStatusResult,
+    SyncTargetResult,
+    SyncTargetType,
     VpnConfig,
     VpnResult,
     add_to_queue,
     branch_matches_pattern,
+    check_filesystem_target_health,
     check_remote_health,
+    check_rsync_target_health,
     clear_queue,
     connect_vpn,
     disconnect_vpn,
     discover_remotes,
     get_sync_state,
+    get_target_branch,
     get_vpn_for_remote,
     is_force_push_required,
+    is_git_repo,
     is_vpn_connected,
     load_config_file,
     load_env_config,
@@ -43,6 +52,9 @@ from pre_commit.remote_sync import (
     merge_configs,
     remove_from_queue,
     save_queue,
+    switch_branch_at_path,
+    sync_to_filesystem,
+    sync_to_rsync,
 )
 
 if TYPE_CHECKING:
@@ -60,7 +72,7 @@ class TestRemoteConfig:
         assert config.branches == ["*"]
         assert config.force_push == ForcePushPolicy.BLOCK
         assert config.retry == 3
-        assert config.timeout == 30
+        assert config.timeout == 60  # Increased default for large pushes
         assert config.group == "default"
 
     def test_from_dict_full_config(self) -> None:
@@ -681,7 +693,7 @@ class TestVpnConfig:
         assert config.connect_cmd == ""
         assert config.disconnect_cmd == ""
         assert config.check_cmd == ""
-        assert config.timeout == 30
+        assert config.timeout == 60  # Increased default for VPN connections
         assert config.auto_connect is True
 
     def test_from_dict_full_config(self) -> None:
@@ -945,3 +957,543 @@ class TestPushResultWithVpn:
             status=PushStatus.SUCCESS,
         )
         assert result.vpn_used is None
+
+
+# =============================================================================
+# Sync Target Tests
+# =============================================================================
+
+
+class TestFilesystemTarget:
+    """Tests for FilesystemTarget configuration."""
+
+    def test_from_dict_minimal(self) -> None:
+        """Test FilesystemTarget with minimal config."""
+        data = {"path": "/backup/repo"}
+        target = FilesystemTarget.from_dict("backup", data)
+
+        assert target.name == "backup"
+        assert target.path == "/backup/repo"
+        assert "__pycache__" in target.exclude  # Default excludes
+        assert ".git" not in target.exclude  # .git NOT excluded by default (preserve repo)
+        assert target.delete is False
+        assert target.branch_mode == BranchMode.MATCH  # Match source branch by default
+
+    def test_from_dict_full_config(self) -> None:
+        """Test FilesystemTarget with full config."""
+        data = {
+            "path": "/backup/repo",
+            "exclude": ["*.pyc", "__pycache__"],
+            "delete": True,
+        }
+        target = FilesystemTarget.from_dict("backup", data)
+
+        assert target.name == "backup"
+        assert target.path == "/backup/repo"
+        assert target.exclude == ["*.pyc", "__pycache__"]
+        assert target.delete is True
+
+
+class TestRsyncTarget:
+    """Tests for RsyncTarget configuration."""
+
+    def test_from_dict_minimal(self) -> None:
+        """Test RsyncTarget with minimal config."""
+        data = {"host": "backup.server.com", "path": "/var/backup/repo"}
+        target = RsyncTarget.from_dict("server", data)
+
+        assert target.name == "server"
+        assert target.host == "backup.server.com"
+        assert target.path == "/var/backup/repo"
+        assert target.user == ""
+        assert target.port == 22
+        assert target.ssh_key == ""
+        assert "__pycache__" in target.exclude  # Default excludes
+        assert ".git" not in target.exclude  # .git NOT excluded by default (preserve repo)
+        assert target.delete is False
+        assert target.branch_mode == BranchMode.MATCH  # Match source branch by default
+
+    def test_from_dict_full_config(self) -> None:
+        """Test RsyncTarget with full config."""
+        data = {
+            "host": "backup.server.com",
+            "path": "/var/backup/repo",
+            "user": "deploy",
+            "port": 2222,
+            "ssh_key": "~/.ssh/backup_key",
+            "exclude": [".git", "node_modules"],
+            "delete": True,
+        }
+        target = RsyncTarget.from_dict("server", data)
+
+        assert target.name == "server"
+        assert target.host == "backup.server.com"
+        assert target.path == "/var/backup/repo"
+        assert target.user == "deploy"
+        assert target.port == 2222
+        assert target.ssh_key == "~/.ssh/backup_key"
+        assert target.exclude == [".git", "node_modules"]
+        assert target.delete is True
+
+
+class TestSyncTargetResult:
+    """Tests for SyncTargetResult dataclass."""
+
+    def test_sync_target_result_success(self) -> None:
+        """Test SyncTargetResult for successful sync."""
+        result = SyncTargetResult(
+            name="backup",
+            target_type=SyncTargetType.FILESYSTEM,
+            success=True,
+            message="Sync completed",
+            duration=5.5,
+        )
+
+        assert result.name == "backup"
+        assert result.target_type == SyncTargetType.FILESYSTEM
+        assert result.success is True
+        assert result.message == "Sync completed"
+
+    def test_sync_target_result_failure(self) -> None:
+        """Test SyncTargetResult for failed sync."""
+        result = SyncTargetResult(
+            name="server",
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="Connection refused",
+            duration=2.0,
+        )
+
+        assert result.name == "server"
+        assert result.target_type == SyncTargetType.RSYNC
+        assert result.success is False
+        assert result.message == "Connection refused"
+
+
+class TestSyncConfigWithTargets:
+    """Tests for SyncConfig with sync_targets."""
+
+    def test_sync_config_with_filesystem_targets(self) -> None:
+        """Test SyncConfig parses filesystem targets."""
+        data = {
+            "sync_targets": {
+                "backup": {"path": "/backup/repo"},
+                "nas": {"path": "/mnt/nas/projects/repo"},
+            }
+        }
+        config = SyncConfig.from_dict(data)
+
+        assert len(config.sync_targets) == 2
+        assert "backup" in config.sync_targets
+        assert config.sync_targets["backup"].target_type == SyncTargetType.FILESYSTEM
+
+    def test_sync_config_with_rsync_targets(self) -> None:
+        """Test SyncConfig parses rsync targets."""
+        data = {
+            "sync_targets": {
+                "server": {
+                    "host": "backup.server.com",
+                    "path": "/var/backup",
+                }
+            }
+        }
+        config = SyncConfig.from_dict(data)
+
+        assert len(config.sync_targets) == 1
+        assert "server" in config.sync_targets
+        assert config.sync_targets["server"].target_type == SyncTargetType.RSYNC
+        assert config.sync_targets["server"].host == "backup.server.com"
+
+    def test_sync_config_mixed_targets(self) -> None:
+        """Test SyncConfig with mixed filesystem and rsync targets."""
+        data = {
+            "sync_targets": {
+                "local": {"path": "/backup/repo"},
+                "remote": {
+                    "host": "server.com",
+                    "path": "/var/backup",
+                },
+            }
+        }
+        config = SyncConfig.from_dict(data)
+
+        assert len(config.sync_targets) == 2
+        types = [t.target_type for t in config.sync_targets.values()]
+        assert SyncTargetType.FILESYSTEM in types
+        assert SyncTargetType.RSYNC in types
+
+
+class TestSyncTargetHealthChecks:
+    """Tests for sync target health checks."""
+
+    def test_check_filesystem_target_health_exists(self, tmp_path: Path) -> None:
+        """Test filesystem target health check for existing directory."""
+        target = FilesystemTarget(
+            name="backup",
+            path=str(tmp_path),
+            exclude=[],
+            delete=False,
+        )
+
+        result = check_filesystem_target_health(target)
+        assert result.status == RemoteStatus.REACHABLE
+
+    def test_check_filesystem_target_health_not_exists(self) -> None:
+        """Test filesystem target health check for non-existing directory."""
+        target = FilesystemTarget(
+            name="backup",
+            path="/nonexistent/path/12345",
+            exclude=[],
+            delete=False,
+        )
+
+        result = check_filesystem_target_health(target)
+        assert result.status == RemoteStatus.UNREACHABLE
+
+    @patch("subprocess.run")
+    def test_check_rsync_target_health_success(self, mock_run: MagicMock) -> None:
+        """Test rsync target health check success."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            "ssh", 0, stdout="ok", stderr=""
+        )
+
+        target = RsyncTarget(
+            name="server",
+            host="backup.server.com",
+            path="/var/backup",
+            user="deploy",
+            port=22,
+            ssh_key="",
+            exclude=[],
+            delete=False,
+        )
+
+        result = check_rsync_target_health(target)
+        assert result.status == RemoteStatus.REACHABLE
+
+    @patch("subprocess.run")
+    def test_check_rsync_target_health_failure(self, mock_run: MagicMock) -> None:
+        """Test rsync target health check failure."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            "ssh", 255, stdout="", stderr="Connection refused"
+        )
+
+        target = RsyncTarget(
+            name="server",
+            host="unreachable.server.com",
+            path="/var/backup",
+            user="",
+            port=22,
+            ssh_key="",
+            exclude=[],
+            delete=False,
+        )
+
+        result = check_rsync_target_health(target)
+        assert result.status == RemoteStatus.UNREACHABLE
+
+
+class TestSyncToFilesystem:
+    """Tests for sync_to_filesystem function."""
+
+    @patch("subprocess.run")
+    def test_sync_to_filesystem_success(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """Test successful filesystem sync."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            "rsync", 0, stdout="", stderr=""
+        )
+
+        # Create a source directory with test file
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "test.txt").write_text("test")
+
+        target = FilesystemTarget(
+            name="backup",
+            path=str(tmp_path / "dest"),
+            exclude=["*.pyc"],
+            delete=False,
+        )
+
+        result = sync_to_filesystem(target, source, dry_run=False)
+
+        assert result.success is True
+        assert result.name == "backup"
+        # At least 2 calls: get_current_branch + rsync
+        assert mock_run.call_count >= 1
+
+    def test_sync_to_filesystem_dry_run(self, tmp_path: Path) -> None:
+        """Test filesystem sync in dry run mode."""
+        source = tmp_path / "source"
+        source.mkdir()
+
+        target = FilesystemTarget(
+            name="backup",
+            path=str(tmp_path / "dest"),
+            exclude=[],
+            delete=False,
+        )
+
+        result = sync_to_filesystem(target, source, dry_run=True)
+
+        assert result.success is True
+        assert "DRY RUN" in result.message
+
+
+class TestSyncToRsync:
+    """Tests for sync_to_rsync function."""
+
+    @patch("subprocess.run")
+    def test_sync_to_rsync_success(self, mock_run: MagicMock, tmp_path: Path) -> None:
+        """Test successful rsync sync."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            "rsync", 0, stdout="", stderr=""
+        )
+
+        source = tmp_path / "source"
+        source.mkdir()
+
+        target = RsyncTarget(
+            name="server",
+            host="backup.server.com",
+            path="/var/backup",
+            user="deploy",
+            port=22,
+            ssh_key="",
+            exclude=[],
+            delete=False,
+        )
+
+        result = sync_to_rsync(target, source, dry_run=False)
+
+        assert result.success is True
+        assert result.name == "server"
+        # At least 2 calls: get_current_branch + rsync
+        assert mock_run.call_count >= 1
+
+    def test_sync_to_rsync_dry_run(self, tmp_path: Path) -> None:
+        """Test rsync sync in dry run mode."""
+        source = tmp_path / "source"
+        source.mkdir()
+
+        target = RsyncTarget(
+            name="server",
+            host="backup.server.com",
+            path="/var/backup",
+            user="",
+            port=22,
+            ssh_key="",
+            exclude=[],
+            delete=False,
+        )
+
+        result = sync_to_rsync(target, source, dry_run=True)
+
+        assert result.success is True
+        assert "DRY RUN" in result.message
+
+    @patch("subprocess.run")
+    def test_sync_to_rsync_with_ssh_key(self, mock_run: MagicMock, tmp_path: Path) -> None:
+        """Test rsync sync with SSH key."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            "rsync", 0, stdout="", stderr=""
+        )
+
+        source = tmp_path / "source"
+        source.mkdir()
+
+        target = RsyncTarget(
+            name="server",
+            host="backup.server.com",
+            path="/var/backup",
+            user="deploy",
+            port=2222,
+            ssh_key="~/.ssh/backup_key",
+            exclude=[],
+            delete=True,
+        )
+
+        result = sync_to_rsync(target, source, dry_run=False)
+
+        assert result.success is True
+        # Verify SSH options are included
+        call_args = mock_run.call_args[0][0]
+        assert "-e" in call_args
+
+
+class TestSyncTargetsCLI:
+    """Tests for CLI options related to sync targets."""
+
+    def test_sync_targets_flag(self) -> None:
+        """Test --sync-targets CLI flag."""
+        from pre_commit.remote_sync import create_argument_parser
+
+        parser = create_argument_parser()
+        args = parser.parse_args(["--sync-targets"])
+
+        assert args.sync_targets is True
+
+    def test_sync_all_flag(self) -> None:
+        """Test --sync-all CLI flag."""
+        from pre_commit.remote_sync import create_argument_parser
+
+        parser = create_argument_parser()
+        args = parser.parse_args(["--sync-all"])
+
+        assert args.sync_all is True
+
+    def test_target_filter_flag(self) -> None:
+        """Test --target CLI flag for filtering."""
+        from pre_commit.remote_sync import create_argument_parser
+
+        parser = create_argument_parser()
+        args = parser.parse_args(["--sync-targets", "--target", "backup,nas"])
+
+        assert args.target == "backup,nas"
+
+
+class TestBranchMode:
+    """Tests for BranchMode enum and branch switching."""
+
+    def test_branch_mode_enum_values(self) -> None:
+        """Test BranchMode enum values."""
+        from pre_commit.remote_sync import BranchMode
+
+        assert BranchMode.KEEP.value == "keep"
+        assert BranchMode.MATCH.value == "match"
+        assert BranchMode.SPECIFIC.value == "specific"
+
+    def test_filesystem_target_with_branch_mode(self) -> None:
+        """Test FilesystemTarget with branch_mode configuration."""
+        from pre_commit.remote_sync import BranchMode
+
+        data = {
+            "path": "/backup/repo",
+            "branch_mode": "match",
+        }
+        target = FilesystemTarget.from_dict("backup", data)
+
+        assert target.branch_mode == BranchMode.MATCH
+
+    def test_filesystem_target_with_specific_branch(self) -> None:
+        """Test FilesystemTarget with specific branch."""
+        from pre_commit.remote_sync import BranchMode
+
+        data = {
+            "path": "/backup/repo",
+            "branch_mode": "specific",
+            "branch": "main",
+        }
+        target = FilesystemTarget.from_dict("backup", data)
+
+        assert target.branch_mode == BranchMode.SPECIFIC
+        assert target.branch == "main"
+
+    def test_rsync_target_with_branch_mode(self) -> None:
+        """Test RsyncTarget with branch_mode configuration."""
+        from pre_commit.remote_sync import BranchMode
+
+        data = {
+            "host": "server.com",
+            "path": "/var/backup",
+            "branch_mode": "match",
+        }
+        target = RsyncTarget.from_dict("server", data)
+
+        assert target.branch_mode == BranchMode.MATCH
+
+    def test_get_target_branch_keep(self) -> None:
+        """Test get_target_branch with KEEP mode."""
+        from pre_commit.remote_sync import BranchMode, get_target_branch
+
+        target = FilesystemTarget(
+            name="backup",
+            path="/backup",
+            branch_mode=BranchMode.KEEP,
+        )
+
+        result = get_target_branch(target, "develop")
+        assert result is None  # Should not switch
+
+    def test_get_target_branch_match(self) -> None:
+        """Test get_target_branch with MATCH mode."""
+        from pre_commit.remote_sync import BranchMode, get_target_branch
+
+        target = FilesystemTarget(
+            name="backup",
+            path="/backup",
+            branch_mode=BranchMode.MATCH,
+        )
+
+        result = get_target_branch(target, "develop")
+        assert result == "develop"
+
+    def test_get_target_branch_specific(self) -> None:
+        """Test get_target_branch with SPECIFIC mode."""
+        from pre_commit.remote_sync import BranchMode, get_target_branch
+
+        target = FilesystemTarget(
+            name="backup",
+            path="/backup",
+            branch_mode=BranchMode.SPECIFIC,
+            branch="main",
+        )
+
+        result = get_target_branch(target, "develop")
+        assert result == "main"  # Should use specific branch, not source
+
+    def test_is_git_repo_true(self, tmp_path: Path) -> None:
+        """Test is_git_repo returns True for git repo."""
+        from pre_commit.remote_sync import is_git_repo
+
+        # Create a fake .git directory
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+
+        assert is_git_repo(tmp_path) is True
+
+    def test_is_git_repo_false(self, tmp_path: Path) -> None:
+        """Test is_git_repo returns False for non-git directory."""
+        from pre_commit.remote_sync import is_git_repo
+
+        assert is_git_repo(tmp_path) is False
+
+    @patch("subprocess.run")
+    def test_switch_branch_at_path_success(self, mock_run: MagicMock, tmp_path: Path) -> None:
+        """Test successful branch switch at local path."""
+        from pre_commit.remote_sync import switch_branch_at_path
+
+        # Create fake .git directory
+        (tmp_path / ".git").mkdir()
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            "git checkout", 0, stdout="Switched to branch 'main'", stderr=""
+        )
+
+        success, message = switch_branch_at_path(tmp_path, "main")
+
+        assert success is True
+        assert "main" in message
+
+    def test_switch_branch_at_path_not_git_repo(self, tmp_path: Path) -> None:
+        """Test branch switch fails for non-git directory."""
+        from pre_commit.remote_sync import switch_branch_at_path
+
+        success, message = switch_branch_at_path(tmp_path, "main")
+
+        assert success is False
+        assert "Not a git repository" in message
+
+    def test_switch_branch_at_path_dry_run(self, tmp_path: Path) -> None:
+        """Test branch switch in dry run mode."""
+        from pre_commit.remote_sync import switch_branch_at_path
+
+        # Create fake .git directory
+        (tmp_path / ".git").mkdir()
+
+        success, message = switch_branch_at_path(tmp_path, "main", dry_run=True)
+
+        assert success is True
+        assert "DRY RUN" in message

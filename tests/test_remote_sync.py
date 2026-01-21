@@ -974,8 +974,10 @@ class TestFilesystemTarget:
 
         assert target.name == "backup"
         assert target.path == "/backup/repo"
-        assert ".git" in target.exclude  # Default excludes
+        assert "__pycache__" in target.exclude  # Default excludes
+        assert ".git" not in target.exclude  # .git NOT excluded by default (preserve repo)
         assert target.delete is False
+        assert target.branch_mode == BranchMode.MATCH  # Match source branch by default
 
     def test_from_dict_full_config(self) -> None:
         """Test FilesystemTarget with full config."""
@@ -1006,8 +1008,10 @@ class TestRsyncTarget:
         assert target.user == ""
         assert target.port == 22
         assert target.ssh_key == ""
-        assert ".git" in target.exclude  # Default excludes
+        assert "__pycache__" in target.exclude  # Default excludes
+        assert ".git" not in target.exclude  # .git NOT excluded by default (preserve repo)
         assert target.delete is False
+        assert target.branch_mode == BranchMode.MATCH  # Match source branch by default
 
     def test_from_dict_full_config(self) -> None:
         """Test RsyncTarget with full config."""

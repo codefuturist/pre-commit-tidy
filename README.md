@@ -345,6 +345,25 @@ In addition to git remotes, you can sync your repository to local filesystem pat
 - **Remote backups**: Servers accessible via SSH
 - **Non-git destinations**: Deployment targets, shared folders
 
+#### Smart Defaults
+
+The sync targets use sensible defaults optimized for keeping git repos in sync:
+
+| Setting | Default | Rationale |
+|---------|---------|-----------|
+| `branch_mode` | `"match"` | Destination follows source branch automatically |
+| `exclude` | Common build artifacts | `.git` is **NOT** excluded to preserve git history |
+| `delete` | `false` | Safe default - won't delete extra files at destination |
+
+**Default excludes**: `__pycache__`, `*.pyc`, `.DS_Store`, `*.egg-info`, `.tox`, `.pytest_cache`, `node_modules`, `.venv`, `venv`
+
+For deployment (non-git) targets, explicitly exclude `.git`:
+```json
+{
+    "exclude": [".git", ".env", "node_modules"]
+}
+```
+
 #### Configuration
 
 Add `sync_targets` to your `.remotesyncrc.json`:
@@ -352,10 +371,8 @@ Add `sync_targets` to your `.remotesyncrc.json`:
 ```json
 {
     "sync_targets": {
-        "external-drive": {
-            "path": "/Volumes/Backup/projects/my-repo",
-            "exclude": [".git", "__pycache__", "*.pyc", "node_modules"],
-            "delete": false
+        "backup": {
+            "path": "/Volumes/Backup/projects/my-repo"
         },
         "nas": {
             "path": "/mnt/nas/backups/my-repo",
@@ -365,9 +382,10 @@ Add `sync_targets` to your `.remotesyncrc.json`:
             "host": "deploy.example.com",
             "path": "/var/www/my-app",
             "user": "deploy",
-            "port": 22,
             "ssh_key": "~/.ssh/deploy_key",
             "exclude": [".git", ".env", "node_modules"],
+            "branch_mode": "specific",
+            "branch": "main",
             "delete": true
         }
     }
@@ -379,9 +397,9 @@ Add `sync_targets` to your `.remotesyncrc.json`:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `path` | string | required | Local destination path |
-| `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
+| `exclude` | list | `["__pycache__", "*.pyc", ...]` | Patterns to exclude (`.git` NOT excluded) |
 | `delete` | bool | `false` | Delete files not in source |
-| `branch_mode` | string | `"keep"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch_mode` | string | `"match"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
 | `branch` | string | `""` | Target branch (for `"specific"` mode) |
 
 #### Rsync Target Options
@@ -393,10 +411,10 @@ Add `sync_targets` to your `.remotesyncrc.json`:
 | `user` | string | `""` | SSH username |
 | `port` | int | `22` | SSH port |
 | `ssh_key` | string | `""` | Path to SSH private key |
-| `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
+| `exclude` | list | `["__pycache__", "*.pyc", ...]` | Patterns to exclude (`.git` NOT excluded) |
 | `delete` | bool | `false` | Delete files not in source |
 | `options` | list | `[]` | Additional rsync options |
-| `branch_mode` | string | `"keep"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
+| `branch_mode` | string | `"match"` | Branch switching: `"keep"`, `"match"`, or `"specific"` |
 | `branch` | string | `""` | Target branch (for `"specific"` mode) |
 
 #### Branch Switching Modes

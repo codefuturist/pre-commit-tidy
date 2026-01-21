@@ -205,9 +205,13 @@ class SyncTargetType(Enum):
 class BranchMode(Enum):
     """Branch switching mode for sync targets."""
 
-    KEEP = "keep"  # Keep destination on its current branch (default)
-    MATCH = "match"  # Switch destination to same branch as source
+    KEEP = "keep"  # Keep destination on its current branch
+    MATCH = "match"  # Switch destination to same branch as source (default)
     SPECIFIC = "specific"  # Always use a specific branch
+
+
+# Default excludes for sync targets (does NOT exclude .git to preserve repo state)
+DEFAULT_SYNC_EXCLUDES = ["__pycache__", "*.pyc", ".DS_Store", "*.egg-info", ".tox", ".pytest_cache", "node_modules", ".venv", "venv"]
 
 
 @dataclass
@@ -216,25 +220,25 @@ class FilesystemTarget:
 
     name: str
     path: str
-    exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
+    exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
     delete: bool = False  # Delete extraneous files in destination
-    branch_mode: BranchMode = BranchMode.KEEP  # Branch switching behavior
+    branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
     branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.FILESYSTEM
 
     @classmethod
     def from_dict(cls, name: str, data: FilesystemTargetDict) -> FilesystemTarget:
         """Create from dictionary."""
-        branch_mode_str = data.get("branch_mode", "keep")
+        branch_mode_str = data.get("branch_mode", "match")
         try:
             branch_mode = BranchMode(branch_mode_str)
         except ValueError:
-            branch_mode = BranchMode.KEEP
+            branch_mode = BranchMode.MATCH
 
         return cls(
             name=name,
             path=data.get("path", ""),
-            exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
             delete=data.get("delete", False),
             branch_mode=branch_mode,
             branch=data.get("branch", ""),
@@ -251,21 +255,21 @@ class RsyncTarget:
     user: str = ""
     port: int = 22
     ssh_key: str = ""
-    exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
+    exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
     delete: bool = False
     options: list[str] = field(default_factory=list)  # Additional rsync options
-    branch_mode: BranchMode = BranchMode.KEEP  # Branch switching behavior
+    branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
     branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.RSYNC
 
     @classmethod
     def from_dict(cls, name: str, data: RsyncTargetDict) -> RsyncTarget:
         """Create from dictionary."""
-        branch_mode_str = data.get("branch_mode", "keep")
+        branch_mode_str = data.get("branch_mode", "match")
         try:
             branch_mode = BranchMode(branch_mode_str)
         except ValueError:
-            branch_mode = BranchMode.KEEP
+            branch_mode = BranchMode.MATCH
 
         return cls(
             name=name,
@@ -274,7 +278,7 @@ class RsyncTarget:
             user=data.get("user", ""),
             port=data.get("port", 22),
             ssh_key=data.get("ssh_key", ""),
-            exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
             delete=data.get("delete", False),
             options=data.get("options", []),
             branch_mode=branch_mode,

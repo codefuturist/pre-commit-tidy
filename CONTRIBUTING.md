@@ -1,89 +1,153 @@
-# Contributing to pre-commit-tidy
+# Contributing
 
-Thank you for your interest in contributing! This document provides guidelines and instructions for contributing.
+## Local development
 
-## Development Setup
+- The complete test suite depends on having at least the following installed
+  (possibly not a complete list)
+  - git (Version 2.24.0 or above is required to run pre-merge-commit tests)
+  - python3 (Required by a test which checks different python versions)
+  - tox (or virtualenv)
+  - ruby + gem
+  - docker
+  - conda
+  - cargo (required by tests for rust dependencies)
+  - go (required by tests for go dependencies)
+  - swift
 
-1. **Clone the repository**
+### Setting up an environment
 
-   ```bash
-   git clone https://github.com/codefuturist/pre-commit-tidy.git
-   cd pre-commit-tidy
-   ```
+This is useful for running specific tests.  The easiest way to set this up
+is to run:
 
-2. **Create a virtual environment**
+1. `tox --devenv venv`  (note: requires tox>=3.13)
+2. `. venv/bin/activate` (or follow the [activation instructions] for your
+   platform)
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
+This will create and put you into a virtualenv which has an editable
+installation of pre-commit.  Hack away!  Running `pre-commit` will reflect
+your changes immediately.
 
-3. **Install in development mode**
+### Running a specific test
 
-   ```bash
-   pip install -e ".[dev]"
-   ```
+Running a specific test with the environment activated is as easy as:
+`pytest tests -k test_the_name_of_your_test`
 
-4. **Install pre-commit hooks**
+### Running all the tests
 
-   ```bash
-   pre-commit install
-   ```
+Running all the tests can be done by running `tox -e py37` (or your
+interpreter version of choice).  These often take a long time and consume
+significant cpu while running the slower node / ruby integration tests.
 
-## Running Tests
+Alternatively, with the environment activated you can run all of the tests
+using:
+`pytest tests`
 
-```bash
-# Run all tests
-pytest
+### Setting up the hooks
 
-# Run with coverage
-pytest --cov=tidy --cov-report=html
+With the environment activated simply run `pre-commit install`.
 
-# Run specific test
-pytest tests/test_tidy.py::test_should_exclude_by_filename
+## Documentation
+
+Documentation is hosted at https://pre-commit.com
+
+This website is controlled through
+https://github.com/pre-commit/pre-commit.github.io
+
+## Adding support for a new hook language
+
+pre-commit already supports many [programming languages](https://pre-commit.com/#supported-languages)
+to write hook executables with.
+
+When adding support for a language, you must first decide what level of support
+to implement.  The current implemented languages are at varying levels:
+
+- 0th class - pre-commit does not require any dependencies for these languages
+  as they're not actually languages (current examples: fail, pygrep)
+- 1st class - pre-commit will bootstrap a full interpreter requiring nothing to
+  be installed globally (current examples: go, node, ruby, rust)
+- 2nd class - pre-commit requires the user to install the language globally but
+  will install tools in an isolated fashion (current examples: python, swift,
+  docker).
+- 3rd class - pre-commit requires the user to install both the tool and the
+  language globally (current examples: script, system)
+
+"second class" is usually the easiest to implement first and is perfectly
+acceptable.
+
+Ideally the language works on the supported platforms for pre-commit (linux,
+windows, macos) but it's ok to skip one or more platforms (for example, swift
+doesn't run on windows).
+
+When writing your new language, it's often useful to look at other examples in
+the `pre_commit/languages` directory.
+
+It might also be useful to look at a recent pull request which added a
+language, for example:
+
+- [rust](https://github.com/pre-commit/pre-commit/pull/751)
+- [fail](https://github.com/pre-commit/pre-commit/pull/812)
+- [swift](https://github.com/pre-commit/pre-commit/pull/467)
+
+### `language` api
+
+here are the apis that should be implemented for a language
+
+Note that these are also documented in [`pre_commit/lang_base.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/lang_base.py)
+
+#### `ENVIRONMENT_DIR`
+
+a short string which will be used for the prefix of where packages will be
+installed.  For example, python uses `py_env` and installs a `virtualenv` at
+that location.
+
+this will be `None` for 0th / 3rd class languages as they don't have an install
+step.
+
+#### `get_default_version`
+
+This is used to retrieve the default `language_version` for a language.  If
+one cannot be determined, return `'default'`.
+
+You generally don't need to implement this on a first pass and can just use:
+
+```python
+get_default_version = lang_base.basic_default_version
 ```
 
-## Code Style
+`python` is currently the only language which implements this api
 
-This project uses:
+#### `health_check`
 
-- **Ruff** for linting and formatting
-- **mypy** for type checking
+This is used to check whether the installed environment is considered healthy.
+This function should return a detailed message if unhealthy or `None` if
+healthy.
 
-Run all checks:
+You generally don't need to implement this on a first pass and can just use:
 
-```bash
-pre-commit run --all-files
+```python
+health_check = lang_base.basic_health_check
 ```
 
-## Submitting Changes
+`python` is currently the only language which implements this api, for python
+it is checking whether some common dlls are still available.
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make your changes
-4. Run tests: `pytest`
-5. Run linting: `pre-commit run --all-files`
-6. Commit with conventional commits: `git commit -m "feat: add new feature"`
-7. Push and create a Pull Request
+#### `install_environment`
 
-## Commit Message Format
+this is the trickiest one to implement and where all the smart parts happen.
 
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
+this api should do the following things
 
-- `feat:` New features
-- `fix:` Bug fixes
-- `docs:` Documentation changes
-- `test:` Test additions or modifications
-- `refactor:` Code refactoring
-- `chore:` Maintenance tasks
+- (0th / 3rd class): `install_environment = lang_base.no_install`
+- (1st class): install a language runtime into the hook's directory
+- (2nd class): install the package at `.` into the `ENVIRONMENT_DIR`
+- (2nd class, optional): install packages listed in `additional_dependencies`
+  into `ENVIRONMENT_DIR` (not a required feature for a first pass)
 
-## Releasing
+#### `run_hook`
 
-Releases are automated via GitHub Actions when a new tag is pushed:
+This is usually the easiest to implement, most of them look the same as the
+`node` hook implementation:
 
-```bash
-git tag -a v1.1.0 -m "Release v1.1.0"
-git push origin v1.1.0
-```
+https://github.com/pre-commit/pre-commit/blob/160238220f022035c8ef869c9a8642f622c02118/pre_commit/languages/node.py#L72-L74
 
-This triggers the CI pipeline which publishes to PyPI.
+[activation instructions]: https://virtualenv.pypa.io/en/latest/user_guide.html#activators

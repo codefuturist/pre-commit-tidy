@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tidy - Automated file organization for repositories.
 
 Moves files from source directories to target directories based on

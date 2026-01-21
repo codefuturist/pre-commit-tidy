@@ -7,7 +7,7 @@ Usage:
     tidy [options]
 
 Options:
-    --config PATH           Path to configuration file (default: .tidyrc.json)
+    --config PATH           Path to configuration file (default: .tidyrc.yaml)
     --source DIR            Source directory (default: .)
     --target DIR            Target directory (default: 00-inbox)
     --extensions EXT        Comma-separated extensions (default: .md)
@@ -20,14 +20,12 @@ Options:
     --exclude-symlinks      Exclude symbolic links
     --min-size SIZE         Minimum file size (e.g., 1KB, 5MB)
     --max-size SIZE         Maximum file size (e.g., 100MB)
-    --modified-after DATE
-        Only files modified after date (YYYY-MM-DD)
-    --modified-before DATE
-        Only files modified before date (YYYY-MM-DD)
-    --collision-keep MODE
-        How to handle collisions: both|newest|largest|source|target
-    --rename-pattern PAT
-        Pattern for renamed files (default: {name}-{timestamp})
+    --modified-after DATE   Only files modified after date (YYYY-MM-DD)
+    --modified-before DATE  Only files modified before date (YYYY-MM-DD)
+    --collision-keep MODE   How to handle collisions: both|newest|largest|source|target
+    --rename-pattern PAT    Pattern for renamed files (default: {name}-{timestamp})
+    --delete-mode MODE      How to delete files: trash (recoverable) or permanent
+    --trash FILE [FILE ...] Move specified files to system trash
     --dry-run               Preview changes without moving files
     --verbose               Show detailed output
     --quiet                 Suppress all output except errors
@@ -38,12 +36,20 @@ Options:
     --help                  Show this help message
     --version               Show version number
 
+Smart Architecture Features:
+    --preset TYPE           Use preset rules for project type
+                            (python|node|go|rust|java|ruby|php|dotnet|generic)
+    --analyze               Analyze repo structure and suggest rules (no changes)
+    --detect-archives       Flag backup/archive files (*.bak, *backup*, *old*)
+    --detect-orphans        Flag files not referenced in the codebase
+    --interactive, -i       Interactively confirm each file move
+
 Configuration:
-    Create a .tidyrc.json file in your project root:
+    Create a .tidyrc.yaml file in your project root:
 
     {
         "source_dir": ".",
-        "target_dir": "00-inbox",
+        "target_dir": "docs",
         "extensions": [".md", ".txt"],
         "exclude_files": ["readme.md", "changelog.md"],
         "exclude_patterns": ["*.config.*"],
@@ -67,6 +73,10 @@ Configuration:
             "rename_pattern": "{name}-{timestamp}"
         },
         "undo_history_limit": 10,
+        "project_type": "auto",
+        "preset": null,
+        "detect_archives": false,
+        "detect_orphans": false,
         "rules": [
             {"pattern": "*.test.md", "target": "tests/"},
             {"pattern": "*.draft.*", "target": "drafts/"},
@@ -74,10 +84,18 @@ Configuration:
         ]
     }
 
-    Rule-based routing supports three formats:
+    Rule-based routing supports four formats:
     1. Pattern matching:  {"pattern": "*.test.md", "target": "tests/"}
-    2. Extension-based:   {"extensions": [".png"], "target": "images/"}
-    3. Glob-to-folder:    {"glob": "docs/**/*.md", "target": "documentation/"}
+    2. Regex matching:    {"regex": "^test_.*\\.py$", "target": "tests/"}
+    3. Extension-based:   {"extensions": [".png"], "target": "images/"}
+    4. Glob-to-folder:    {"glob": "docs/**/*.md", "target": "documentation/"}
+
+    Regex patterns use Python's re module with case-insensitive matching.
+    Both filename and relative path are checked against regex patterns.
+
+    Exclusion patterns:
+    - "exclude_patterns": Glob-style patterns (e.g., "*.bak", "temp-*")
+    - "exclude_regex": Regex patterns (e.g., "^\\d{8}_backup")
 
     Collision handling modes:
     - "both": Rename the incoming file (default, same as old "rename")
@@ -94,6 +112,17 @@ Configuration:
     - {time}: Time in HH-MM-SS format
     - {hash}: First 8 characters of content hash (if available)
 
+    Supported project presets:
+    - python: Python projects (setup.py, pyproject.toml)
+    - node: Node.js projects (package.json)
+    - go: Go projects (go.mod)
+    - rust: Rust projects (Cargo.toml)
+    - java: Java projects (pom.xml, build.gradle)
+    - ruby: Ruby projects (Gemfile)
+    - php: PHP projects (composer.json)
+    - dotnet: .NET projects (*.csproj, *.sln)
+    - generic: Generic fallback
+
 Environment Variables:
     TIDY_SOURCE_DIR     Source directory
     TIDY_TARGET_DIR     Target directory
@@ -103,6 +132,13 @@ Environment Variables:
     TIDY_DRY_RUN        Set to 'true' for dry run
     TIDY_VERBOSE        Set to 'true' for verbose output
     TIDY_RECURSIVE      Set to 'true' for recursive scanning
+
+Examples:
+    tidy --analyze                    # Analyze repo and suggest rules
+    tidy --preset python              # Use Python project preset
+    tidy --detect-archives            # Flag backup/archive files
+    tidy --interactive                # Confirm each move interactively
+    tidy --dry-run --verbose          # Preview all changes
 """
 from __future__ import annotations
 
@@ -124,11 +160,26 @@ from pathlib import Path
 from typing import Any
 from typing import TypedDict
 
+import yaml
+
+# Cross-platform trash support
+try:
+    from send2trash import send2trash
+    TRASH_AVAILABLE = True
+except ImportError:
+    TRASH_AVAILABLE = False
+
+    def send2trash(path: str | Path) -> None:  # type: ignore[misc]
+        """Fallback when send2trash is not installed."""
+        raise RuntimeError(
+            "send2trash is not installed. Install with: pip install send2trash"
+        )
+
 # Version
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 # Default configuration file names to search for
-CONFIG_FILE_NAMES = ['.tidyrc.json', '.tidyrc', 'tidy.config.json']
+CONFIG_FILE_NAMES = ['.tidyrc.yaml', '.tidyrc.yml', 'tidy.config.yaml']
 
 # Undo history directory (replaces single file for persistent history)
 UNDO_HISTORY_DIR = '.tidy-undo'
@@ -138,6 +189,748 @@ UNDO_MANIFEST_FILE = '.tidy-undo.json'
 
 # Default undo history limit
 DEFAULT_UNDO_HISTORY_LIMIT = 10
+
+
+# =============================================================================
+# Project Type Detection and Presets
+# =============================================================================
+
+class ProjectType(Enum):
+    """Supported project types for auto-detection."""
+
+    AUTO = 'auto'  # Auto-detect from markers
+    PYTHON = 'python'
+    NODE = 'node'
+    GO = 'go'
+    RUST = 'rust'
+    JAVA = 'java'
+    RUBY = 'ruby'
+    PHP = 'php'
+    DOTNET = 'dotnet'
+    SWIFT = 'swift'
+    KOTLIN = 'kotlin'
+    SCALA = 'scala'
+    ELIXIR = 'elixir'
+    HASKELL = 'haskell'
+    C_CPP = 'c_cpp'
+    TERRAFORM = 'terraform'
+    DOCKER = 'docker'
+    MONOREPO = 'monorepo'
+    GENERIC = 'generic'  # No specific type detected
+
+
+class DetectionConfidence(Enum):
+    """Confidence level of project type detection."""
+
+    HIGH = 'high'  # Primary marker file found (e.g., package.json for Node)
+    MEDIUM = 'medium'  # Secondary markers or conventions match
+    LOW = 'low'  # Only weak indicators present
+    NONE = 'none'  # No indicators, using generic
+
+
+@dataclass
+class DetectionResult:
+    """Result of project type detection with confidence."""
+
+    project_type: str
+    confidence: DetectionConfidence
+    markers_found: list[str]
+    all_detected_types: list[tuple[str, DetectionConfidence, list[str]]]  # Other potential types  # noqa: E501
+
+    @property
+    def is_confident(self) -> bool:
+        """Return True if detection confidence is HIGH or MEDIUM."""
+        return self.confidence in (DetectionConfidence.HIGH, DetectionConfidence.MEDIUM)
+
+
+# Marker files with confidence weights for project type detection
+# Format: {project_type: [(marker, confidence), ...]}
+# Higher confidence = more definitive marker
+PROJECT_MARKERS: dict[str, list[tuple[str, DetectionConfidence]]] = {
+    'python': [
+        ('pyproject.toml', DetectionConfidence.HIGH),
+        ('setup.py', DetectionConfidence.HIGH),
+        ('setup.cfg', DetectionConfidence.HIGH),
+        ('Pipfile', DetectionConfidence.HIGH),
+        ('poetry.lock', DetectionConfidence.HIGH),
+        ('requirements.txt', DetectionConfidence.MEDIUM),
+        ('tox.ini', DetectionConfidence.MEDIUM),
+        ('.python-version', DetectionConfidence.MEDIUM),
+        ('__init__.py', DetectionConfidence.LOW),
+        ('*.py', DetectionConfidence.LOW),
+    ],
+    'node': [
+        ('package.json', DetectionConfidence.HIGH),
+        ('package-lock.json', DetectionConfidence.HIGH),
+        ('yarn.lock', DetectionConfidence.HIGH),
+        ('pnpm-lock.yaml', DetectionConfidence.HIGH),
+        ('bun.lockb', DetectionConfidence.HIGH),
+        ('tsconfig.json', DetectionConfidence.MEDIUM),
+        ('jsconfig.json', DetectionConfidence.MEDIUM),
+        ('.nvmrc', DetectionConfidence.MEDIUM),
+        ('.node-version', DetectionConfidence.MEDIUM),
+        ('webpack.config.js', DetectionConfidence.MEDIUM),
+        ('vite.config.*', DetectionConfidence.MEDIUM),
+        ('next.config.*', DetectionConfidence.MEDIUM),
+        ('nuxt.config.*', DetectionConfidence.MEDIUM),
+    ],
+    'go': [
+        ('go.mod', DetectionConfidence.HIGH),
+        ('go.sum', DetectionConfidence.HIGH),
+        ('go.work', DetectionConfidence.HIGH),
+        ('*.go', DetectionConfidence.MEDIUM),
+        ('cmd/', DetectionConfidence.MEDIUM),
+        ('pkg/', DetectionConfidence.LOW),
+    ],
+    'rust': [
+        ('Cargo.toml', DetectionConfidence.HIGH),
+        ('Cargo.lock', DetectionConfidence.HIGH),
+        ('rust-toolchain.toml', DetectionConfidence.HIGH),
+        ('rust-toolchain', DetectionConfidence.MEDIUM),
+        ('*.rs', DetectionConfidence.MEDIUM),
+    ],
+    'java': [
+        ('pom.xml', DetectionConfidence.HIGH),
+        ('build.gradle', DetectionConfidence.HIGH),
+        ('build.gradle.kts', DetectionConfidence.HIGH),
+        ('settings.gradle', DetectionConfidence.HIGH),
+        ('settings.gradle.kts', DetectionConfidence.HIGH),
+        ('gradlew', DetectionConfidence.MEDIUM),
+        ('mvnw', DetectionConfidence.MEDIUM),
+        ('.mvn/', DetectionConfidence.MEDIUM),
+        ('*.java', DetectionConfidence.MEDIUM),
+        ('src/main/java/', DetectionConfidence.MEDIUM),
+    ],
+    'ruby': [
+        ('Gemfile', DetectionConfidence.HIGH),
+        ('Gemfile.lock', DetectionConfidence.HIGH),
+        ('*.gemspec', DetectionConfidence.HIGH),
+        ('Rakefile', DetectionConfidence.MEDIUM),
+        ('.ruby-version', DetectionConfidence.MEDIUM),
+        ('.ruby-gemset', DetectionConfidence.MEDIUM),
+        ('config.ru', DetectionConfidence.MEDIUM),
+        ('*.rb', DetectionConfidence.LOW),
+    ],
+    'php': [
+        ('composer.json', DetectionConfidence.HIGH),
+        ('composer.lock', DetectionConfidence.HIGH),
+        ('artisan', DetectionConfidence.HIGH),  # Laravel
+        ('phpunit.xml', DetectionConfidence.MEDIUM),
+        ('phpunit.xml.dist', DetectionConfidence.MEDIUM),
+        ('.php-version', DetectionConfidence.MEDIUM),
+        ('*.php', DetectionConfidence.LOW),
+    ],
+    'dotnet': [
+        ('*.sln', DetectionConfidence.HIGH),
+        ('*.csproj', DetectionConfidence.HIGH),
+        ('*.fsproj', DetectionConfidence.HIGH),
+        ('*.vbproj', DetectionConfidence.HIGH),
+        ('nuget.config', DetectionConfidence.MEDIUM),
+        ('global.json', DetectionConfidence.MEDIUM),
+        ('packages.config', DetectionConfidence.MEDIUM),
+        ('*.cs', DetectionConfidence.LOW),
+    ],
+    'swift': [
+        ('Package.swift', DetectionConfidence.HIGH),
+        ('*.xcodeproj', DetectionConfidence.HIGH),
+        ('*.xcworkspace', DetectionConfidence.HIGH),
+        ('Podfile', DetectionConfidence.MEDIUM),
+        ('Cartfile', DetectionConfidence.MEDIUM),
+        ('*.swift', DetectionConfidence.MEDIUM),
+    ],
+    'kotlin': [
+        ('build.gradle.kts', DetectionConfidence.MEDIUM),  # Could also be Java
+        ('settings.gradle.kts', DetectionConfidence.MEDIUM),
+        ('*.kt', DetectionConfidence.HIGH),
+        ('*.kts', DetectionConfidence.MEDIUM),
+    ],
+    'scala': [
+        ('build.sbt', DetectionConfidence.HIGH),
+        ('project/build.properties', DetectionConfidence.HIGH),
+        ('*.scala', DetectionConfidence.MEDIUM),
+        ('.scalafix.conf', DetectionConfidence.MEDIUM),
+    ],
+    'elixir': [
+        ('mix.exs', DetectionConfidence.HIGH),
+        ('mix.lock', DetectionConfidence.HIGH),
+        ('*.ex', DetectionConfidence.MEDIUM),
+        ('*.exs', DetectionConfidence.MEDIUM),
+    ],
+    'haskell': [
+        ('*.cabal', DetectionConfidence.HIGH),
+        ('stack.yaml', DetectionConfidence.HIGH),
+        ('cabal.project', DetectionConfidence.HIGH),
+        ('*.hs', DetectionConfidence.MEDIUM),
+        ('Setup.hs', DetectionConfidence.MEDIUM),
+    ],
+    'c_cpp': [
+        ('CMakeLists.txt', DetectionConfidence.HIGH),
+        ('Makefile', DetectionConfidence.MEDIUM),  # Could be many languages
+        ('configure.ac', DetectionConfidence.HIGH),
+        ('meson.build', DetectionConfidence.HIGH),
+        ('conanfile.txt', DetectionConfidence.HIGH),
+        ('vcpkg.json', DetectionConfidence.HIGH),
+        ('*.c', DetectionConfidence.MEDIUM),
+        ('*.cpp', DetectionConfidence.MEDIUM),
+        ('*.h', DetectionConfidence.LOW),
+        ('*.hpp', DetectionConfidence.LOW),
+    ],
+    'terraform': [
+        ('*.tf', DetectionConfidence.HIGH),
+        ('*.tfvars', DetectionConfidence.HIGH),
+        ('.terraform.lock.hcl', DetectionConfidence.HIGH),
+        ('terraform.tfstate', DetectionConfidence.MEDIUM),
+    ],
+    'docker': [
+        ('Dockerfile', DetectionConfidence.HIGH),
+        ('docker-compose.yml', DetectionConfidence.HIGH),
+        ('docker-compose.yaml', DetectionConfidence.HIGH),
+        ('compose.yml', DetectionConfidence.HIGH),
+        ('compose.yaml', DetectionConfidence.HIGH),
+        ('.dockerignore', DetectionConfidence.MEDIUM),
+    ],
+    'monorepo': [
+        ('lerna.json', DetectionConfidence.HIGH),
+        ('pnpm-workspace.yaml', DetectionConfidence.HIGH),
+        ('nx.json', DetectionConfidence.HIGH),
+        ('turbo.json', DetectionConfidence.HIGH),
+        ('rush.json', DetectionConfidence.HIGH),
+        ('packages/', DetectionConfidence.MEDIUM),
+        ('apps/', DetectionConfidence.LOW),
+    ],
+}
+
+# Standard directory conventions per project type
+LANGUAGE_CONVENTIONS: dict[str, dict[str, list[str]]] = {
+    'python': {
+        'source': ['src/', 'lib/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'config/'],
+        'assets': ['assets/', 'resources/', 'static/'],
+    },
+    'node': {
+        'source': ['src/', 'lib/', 'app/'],
+        'tests': ['test/', '__tests__/', 'tests/', 'spec/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'config/'],
+        'assets': ['public/', 'assets/', 'static/'],
+    },
+    'go': {
+        'source': ['cmd/', 'pkg/', 'internal/'],
+        'tests': ['.'],  # Go tests live alongside code
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'configs/'],
+        'assets': ['assets/', 'web/'],
+    },
+    'rust': {
+        'source': ['src/'],
+        'tests': ['tests/', 'src/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['assets/', 'resources/'],
+    },
+    'java': {
+        'source': ['src/main/java/', 'src/'],
+        'tests': ['src/test/java/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'src/main/resources/'],
+        'assets': ['src/main/resources/', 'assets/'],
+    },
+    'ruby': {
+        'source': ['lib/', 'app/'],
+        'tests': ['test/', 'spec/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'config/'],
+        'assets': ['assets/', 'public/'],
+    },
+    'php': {
+        'source': ['src/', 'app/', 'lib/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'config/'],
+        'assets': ['public/', 'assets/', 'resources/'],
+    },
+    'dotnet': {
+        'source': ['src/', 'Source/'],
+        'tests': ['tests/', 'Tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['assets/', 'wwwroot/'],
+    },
+    'swift': {
+        'source': ['Sources/', 'src/'],
+        'tests': ['Tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['Resources/', 'assets/'],
+    },
+    'kotlin': {
+        'source': ['src/main/kotlin/', 'src/'],
+        'tests': ['src/test/kotlin/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['src/main/resources/', 'assets/'],
+    },
+    'scala': {
+        'source': ['src/main/scala/', 'src/'],
+        'tests': ['src/test/scala/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'project/'],
+        'assets': ['src/main/resources/', 'assets/'],
+    },
+    'elixir': {
+        'source': ['lib/'],
+        'tests': ['test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'config/'],
+        'assets': ['priv/', 'assets/'],
+    },
+    'haskell': {
+        'source': ['src/', 'lib/', 'app/'],
+        'tests': ['test/', 'tests/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['assets/', 'resources/'],
+    },
+    'c_cpp': {
+        'source': ['src/', 'lib/', 'source/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.', 'cmake/'],
+        'assets': ['assets/', 'resources/'],
+    },
+    'terraform': {
+        'source': ['.', 'modules/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['templates/'],
+    },
+    'docker': {
+        'source': ['.'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['scripts/', 'configs/'],
+    },
+    'monorepo': {
+        'source': ['packages/', 'apps/', 'libs/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['assets/', 'shared/'],
+    },
+    'generic': {
+        'source': ['src/', 'lib/'],
+        'tests': ['tests/', 'test/'],
+        'docs': ['docs/', 'doc/'],
+        'config_root': ['.'],
+        'assets': ['assets/', 'resources/'],
+    },
+}
+
+# Files that should stay in root for each project type
+ROOT_FILES: dict[str, list[str]] = {
+    'python': [
+        'setup.py', 'setup.cfg', 'pyproject.toml', 'requirements*.txt',
+        'tox.ini', 'Makefile', 'MANIFEST.in', '.pre-commit-config.yaml',
+        'README*', 'LICENSE*', 'CHANGELOG*', 'CONTRIBUTING*', 'AUTHORS*',
+        'noxfile.py', 'conftest.py', '.coveragerc', 'pytest.ini',
+    ],
+    'node': [
+        'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+        'tsconfig.json', 'jsconfig.json', 'webpack.config.js', 'vite.config.*',
+        'rollup.config.*', 'babel.config.*', '.eslintrc*', '.prettierrc*',
+        'jest.config.*', 'vitest.config.*', '.npmrc', '.nvmrc',
+        'README*', 'LICENSE*', 'CHANGELOG*', 'CONTRIBUTING*',
+    ],
+    'go': [
+        'go.mod', 'go.sum', 'go.work', 'Makefile', 'README*', 'LICENSE*',
+        'CHANGELOG*', 'CONTRIBUTING*', '.goreleaser.yml', 'main.go',
+    ],
+    'rust': [
+        'Cargo.toml', 'Cargo.lock', 'README*', 'LICENSE*', 'CHANGELOG*',
+        'CONTRIBUTING*', 'rust-toolchain.toml', 'rust-toolchain', '.cargo/',
+        'build.rs', 'clippy.toml', 'rustfmt.toml',
+    ],
+    'java': [
+        'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle',
+        'settings.gradle.kts', 'gradlew', 'gradlew.bat', 'mvnw', 'mvnw.cmd',
+        'README*', 'LICENSE*', 'CHANGELOG*', '.mvn/',
+    ],
+    'ruby': [
+        'Gemfile', 'Gemfile.lock', 'Rakefile', '*.gemspec', 'README*',
+        'LICENSE*', 'CHANGELOG*', '.rubocop.yml', '.rspec', 'config.ru',
+    ],
+    'php': [
+        'composer.json', 'composer.lock', 'phpunit.xml', 'phpunit.xml.dist',
+        'README*', 'LICENSE*', 'CHANGELOG*', 'artisan', '.php-cs-fixer.php',
+        'phpstan.neon', 'psalm.xml',
+    ],
+    'dotnet': [
+        '*.sln', '*.csproj', '*.fsproj', 'nuget.config', 'global.json',
+        'README*', 'LICENSE*', 'CHANGELOG*', 'Directory.Build.props',
+        'Directory.Packages.props', '.editorconfig',
+    ],
+    'swift': [
+        'Package.swift', 'Package.resolved', '*.xcodeproj', '*.xcworkspace',
+        'Podfile', 'Podfile.lock', 'Cartfile', 'Cartfile.resolved',
+        'README*', 'LICENSE*', 'CHANGELOG*', '.swiftlint.yml',
+    ],
+    'kotlin': [
+        'build.gradle.kts', 'settings.gradle.kts', 'gradlew', 'gradlew.bat',
+        'README*', 'LICENSE*', 'CHANGELOG*', 'detekt.yml',
+    ],
+    'scala': [
+        'build.sbt', 'project/', 'README*', 'LICENSE*', 'CHANGELOG*',
+        '.scalafmt.conf', '.scalafix.conf',
+    ],
+    'elixir': [
+        'mix.exs', 'mix.lock', 'README*', 'LICENSE*', 'CHANGELOG*',
+        '.formatter.exs', '.credo.exs',
+    ],
+    'haskell': [
+        '*.cabal', 'stack.yaml', 'stack.yaml.lock', 'cabal.project',
+        'Setup.hs', 'README*', 'LICENSE*', 'CHANGELOG*', 'hie.yaml',
+    ],
+    'c_cpp': [
+        'CMakeLists.txt', 'Makefile', 'configure.ac', 'configure',
+        'meson.build', 'meson_options.txt', 'conanfile.txt', 'conanfile.py',
+        'vcpkg.json', 'README*', 'LICENSE*', 'CHANGELOG*', '.clang-format',
+        '.clang-tidy',
+    ],
+    'terraform': [
+        '*.tf', '*.tfvars', 'terraform.tfstate', '.terraform.lock.hcl',
+        'README*', 'LICENSE*', 'CHANGELOG*', '.terraformrc', 'backend.tf',
+        'versions.tf', 'providers.tf', 'main.tf', 'variables.tf', 'outputs.tf',
+    ],
+    'docker': [
+        'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+        'compose.yml', 'compose.yaml', '.dockerignore', 'README*', 'LICENSE*',
+        'CHANGELOG*',
+    ],
+    'monorepo': [
+        'lerna.json', 'pnpm-workspace.yaml', 'nx.json', 'turbo.json',
+        'rush.json', 'package.json', 'README*', 'LICENSE*', 'CHANGELOG*',
+        '.npmrc', 'pnpm-lock.yaml', 'yarn.lock',
+    ],
+    'generic': [
+        'Makefile', 'README*', 'LICENSE*', 'CHANGELOG*', 'CONTRIBUTING*',
+        '.pre-commit-config.yaml', '.editorconfig', '.gitignore', '.gitattributes',
+        'Dockerfile', 'docker-compose.yml', 'Vagrantfile', 'Jenkinsfile',
+        '.travis.yml', '.github/', '.gitlab-ci.yml', 'azure-pipelines.yml',
+    ],
+}
+
+# Archive/backup file patterns
+ARCHIVE_PATTERNS: list[str] = [
+    '*backup*', '*Backup*', '*BACKUP*',
+    '*old*', '*Old*', '*OLD*',
+    '*archive*', '*Archive*', '*ARCHIVE*',
+    '*tmp*', '*temp*', '*Temp*', '*TEMP*',
+    '*.bak', '*.backup', '*.old', '*.orig',
+    '*~', '*.swp', '*.swo',
+    '*copy*', '*Copy*', '*COPY*',
+    '* (1)*', '* (2)*', '* (copy)*',
+    '*_deprecated*', '*_obsolete*',
+    '*.bkp', '*.save', '*.saved',
+]
+
+# Built-in presets for each project type
+PRESETS: dict[str, dict[str, Any]] = {
+    'python': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.rst', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license', 'authors.md'],  # noqa: E501
+        'exclude_patterns': ['requirements*.txt'],
+        'exclude_dirs': ['docs', '.git', '.github', 'tests', 'test', 'src', 'lib', '.tox', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', 'dist', 'build', '.eggs'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'node': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'node_modules', 'src', 'lib', 'test', 'tests', '__tests__', 'dist', 'build', 'coverage', '.next', '.nuxt'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'go': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'cmd', 'pkg', 'internal', 'vendor', 'bin'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'rust': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'target', 'tests', 'benches', 'examples'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'java': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'target', 'build', '.gradle', '.idea', '.mvn'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'ruby': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'lib', 'app', 'spec', 'test', 'vendor', 'coverage'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'php': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'app', 'vendor', 'tests', 'test', 'storage', 'bootstrap'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'dotnet': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'tests', 'bin', 'obj', 'packages', '.vs'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'swift': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'Sources', 'Tests', '.build', 'Pods', 'Carthage'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'kotlin': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'build', '.gradle', '.idea'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'scala': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'target', 'project', '.bsp'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'elixir': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'lib', 'test', '_build', 'deps', 'priv'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'haskell': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'lib', 'app', 'test', '.stack-work', 'dist-newstyle'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'c_cpp': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'lib', 'include', 'build', 'cmake-build-*', 'out'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'terraform': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', '.terraform', 'modules'],
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'docker': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github'],
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'monorepo': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'packages', 'apps', 'libs', 'node_modules', '.turbo', '.nx'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+    'generic': {
+        'target_dir': 'docs',
+        'extensions': ['.md', '.rst', '.txt'],
+        'exclude_files': ['readme.md', 'changelog.md', 'contributing.md', 'license.md', 'license'],  # noqa: E501
+        'exclude_dirs': ['docs', '.git', '.github', 'src', 'lib', 'tests', 'test', 'vendor', 'node_modules'],  # noqa: E501
+        'recursive': False,
+        'filters': {'exclude_hidden': True},
+    },
+}
+
+
+def detect_project_type(root_dir: Path, warn_on_low_confidence: bool = True) -> str:
+    """Detect project type based on marker files.
+
+    Returns the project type string (e.g., 'python', 'node') or 'generic'.
+    """
+    result = detect_project_type_with_confidence(root_dir)
+
+    if warn_on_low_confidence and result.confidence == DetectionConfidence.LOW:
+        import sys
+        print(
+            f"{Colors.YELLOW}Warning:{Colors.RESET} Low confidence detection of "
+            f"'{result.project_type}' project type. Found markers: "
+            f"{', '.join(result.markers_found)}",
+            file=sys.stderr,
+        )
+        if result.all_detected_types:
+            other_types = [
+                f"{t} ({c.value})" for t, c, _ in result.all_detected_types
+                if t != result.project_type
+            ][:3]
+            if other_types:
+                print(
+                    f"         Other possible types: {', '.join(other_types)}",
+                    file=sys.stderr,
+                )
+        print(
+            "         Use --preset to specify explicitly, or add more marker files.",
+            file=sys.stderr,
+        )
+
+    return result.project_type
+
+
+def detect_project_type_with_confidence(root_dir: Path) -> DetectionResult:
+    """Detect project type with confidence level.
+
+    Returns a DetectionResult with the project type, confidence level,
+    and markers found.
+    """
+    all_detected: list[tuple[str, DetectionConfidence, list[str]]] = []
+
+    for project_type, markers in PROJECT_MARKERS.items():
+        found_markers: list[str] = []
+        best_confidence = DetectionConfidence.NONE
+
+        for marker, confidence in markers:
+            marker_found = False
+
+            if marker.endswith('/'):
+                # Directory check
+                if (root_dir / marker.rstrip('/')).is_dir():
+                    marker_found = True
+            elif '*' in marker:
+                # Glob pattern
+                if list(root_dir.glob(marker)):
+                    marker_found = True
+            elif (root_dir / marker).exists():
+                marker_found = True
+
+            if marker_found:
+                found_markers.append(marker)
+                # Keep highest confidence found
+                if confidence.value < best_confidence.value or best_confidence == DetectionConfidence.NONE:  # noqa: E501
+                    # Enum values: HIGH < MEDIUM < LOW < NONE (alphabetically)
+                    # We want HIGH > MEDIUM > LOW > NONE
+                    conf_order = {
+                        DetectionConfidence.HIGH: 0,
+                        DetectionConfidence.MEDIUM: 1,
+                        DetectionConfidence.LOW: 2,
+                        DetectionConfidence.NONE: 3,
+                    }
+                    if conf_order[confidence] < conf_order[best_confidence]:
+                        best_confidence = confidence
+
+        if found_markers:
+            all_detected.append((project_type, best_confidence, found_markers))
+
+    # Sort by confidence (HIGH first), then by number of markers found
+    conf_order = {
+        DetectionConfidence.HIGH: 0,
+        DetectionConfidence.MEDIUM: 1,
+        DetectionConfidence.LOW: 2,
+        DetectionConfidence.NONE: 3,
+    }
+    all_detected.sort(key=lambda x: (conf_order[x[1]], -len(x[2])))
+
+    if all_detected:
+        best_type, best_conf, best_markers = all_detected[0]
+        return DetectionResult(
+            project_type=best_type,
+            confidence=best_conf,
+            markers_found=best_markers,
+            all_detected_types=all_detected,
+        )
+
+    return DetectionResult(
+        project_type='generic',
+        confidence=DetectionConfidence.NONE,
+        markers_found=[],
+        all_detected_types=[],
+    )
+
+
+def get_preset(project_type: str) -> dict[str, Any]:
+    """Get the preset configuration for a project type."""
+    return PRESETS.get(project_type, PRESETS['generic']).copy()
+
+
+def is_root_file(filename: str, project_type: str) -> bool:
+    """Check if a file should stay in the root directory."""
+    patterns = ROOT_FILES.get(project_type, ROOT_FILES['generic'])
+    for pattern in patterns:
+        if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(filename.lower(), pattern.lower()):  # noqa: E501
+            return True
+    return False
+
+
+def is_archive_file(filename: str) -> bool:
+    """Check if a file looks like a backup/archive file."""
+    for pattern in ARCHIVE_PATTERNS:
+        if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(filename.lower(), pattern.lower()):  # noqa: E501
+            return True
+    return False
+
+
+def is_test_file(filepath: Path, project_type: str) -> bool:
+    """Check if a file is a test file based on naming conventions."""
+    name = filepath.name.lower()
+    stem = filepath.stem.lower()
+
+    # Common test patterns
+    if name.startswith('test_') or name.endswith('_test.py'):
+        return True
+    if stem.endswith('_test') or stem.endswith('.test') or stem.endswith('_spec'):
+        return True
+    if stem.startswith('test') and filepath.suffix in ['.py', '.js', '.ts', '.go', '.rs']:  # noqa: E501
+        return True
+
+    # Check if in a test directory
+    parts = [p.lower() for p in filepath.parts]
+    if any(p in ['tests', 'test', '__tests__', 'spec'] for p in parts):
+        return True
+
+    return False
 
 
 def parse_size(size_str: str | int) -> int:
@@ -247,6 +1040,13 @@ class CollisionKeep(Enum):
     TARGET = 'target'  # Always keep target (skip source)
 
 
+class DeleteMode(Enum):
+    """How to handle file deletion."""
+
+    TRASH = 'trash'  # Move to system trash (default, recoverable)
+    PERMANENT = 'permanent'  # Permanently delete (unrecoverable)
+
+
 class OperationStatus(Enum):
     """Status of a file operation."""
 
@@ -254,6 +1054,8 @@ class OperationStatus(Enum):
     SKIPPED = 'skipped'
     FAILED = 'failed'
     DUPLICATE = 'duplicate'
+    TRASHED = 'trashed'
+    DELETED = 'deleted'
 
 
 @dataclass
@@ -429,18 +1231,43 @@ class ConfigDict(TypedDict, total=False):
 
 @dataclass
 class RoutingRule:
-    """A rule for routing files to specific targets."""
+    """A rule for routing files to specific targets.
+
+    Supports multiple matching modes:
+    - pattern: Glob-style pattern (e.g., "*.test.md", "draft-*")
+    - regex: Regular expression pattern (e.g., "^test_.*\\.py$")
+    - extensions: List of file extensions (e.g., [".png", ".jpg"])
+    - glob: Full path glob pattern (e.g., "docs/**/*.md")
+    """
 
     target: str
-    pattern: str | None = None
+    pattern: str | None = None  # Glob-style pattern for filename
+    regex: str | None = None  # Regex pattern for filename
     extensions: list[str] | None = None
-    glob: str | None = None
+    glob: str | None = None  # Full path glob pattern
+    _compiled_regex: re.Pattern[str] | None = field(default=None, repr=False, compare=False)  # noqa: E501
+
+    def __post_init__(self) -> None:
+        """Compile regex pattern if provided."""
+        if self.regex:
+            try:
+                self._compiled_regex = re.compile(self.regex, re.IGNORECASE)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern '{self.regex}': {e}")
 
     def matches(self, file_path: Path, relative_path: str) -> bool:
         """Check if this rule matches the given file."""
         filename = file_path.name
 
-        # Pattern matching (e.g., "*.test.md")
+        # Regex matching (e.g., "^test_.*\\.py$")
+        if self._compiled_regex:
+            if self._compiled_regex.search(filename):
+                return True
+            # Also try matching against relative path for path-based regex
+            if self._compiled_regex.search(relative_path):
+                return True
+
+        # Pattern matching (e.g., "*.test.md") - glob-style
         if self.pattern:
             if fnmatch.fnmatch(filename.lower(), self.pattern.lower()):
                 return True
@@ -499,7 +1326,9 @@ class TidyConfig:
             'contributing.md',
         ],
     )
-    exclude_patterns: list[str] = field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)  # Glob patterns
+    exclude_regex: list[str] = field(default_factory=list)  # Regex patterns
+    _compiled_exclude_regex: list[re.Pattern[str]] = field(default_factory=list, repr=False)  # noqa: E501
     exclude_dirs: list[str] = field(default_factory=lambda: DEFAULT_EXCLUDE_DIRS.copy())  # noqa: E501
     duplicate_strategy: DuplicateStrategy = DuplicateStrategy.RENAME
     dedup_by_content: bool = False
@@ -509,7 +1338,16 @@ class TidyConfig:
     flatten_depth: int | None = None
     filters: FilterConfig = field(default_factory=FilterConfig)
     collision: CollisionConfig = field(default_factory=CollisionConfig)
+    delete_mode: DeleteMode = DeleteMode.TRASH  # How to handle file deletion
     undo_history_limit: int = DEFAULT_UNDO_HISTORY_LIMIT
+    create_legacy_undo_file: bool = False
+    # Smart architecture features
+    project_type: str = 'auto'  # auto, python, node, go, rust, java, generic
+    preset: str | None = None  # Use preset config for project type
+    detect_archives: bool = False  # Flag archive/backup files
+    detect_orphans: bool = False  # Flag files not referenced in codebase
+    interactive: bool = False  # Ask before moving ambiguous files
+    analyze_only: bool = False  # Just analyze, don't move (implies dry_run)
     rules: list[RoutingRule] = field(default_factory=list)
     dry_run: bool = False
     verbosity: int = 1  # 0=quiet, 1=normal, 2=verbose
@@ -531,6 +1369,16 @@ class TidyConfig:
             config.exclude_files = data['exclude_files']
         if 'exclude_patterns' in data:
             config.exclude_patterns = data['exclude_patterns']
+        if 'exclude_regex' in data:
+            config.exclude_regex = data['exclude_regex']
+            # Compile regex patterns
+            for pattern in config.exclude_regex:
+                try:
+                    config._compiled_exclude_regex.append(
+                        re.compile(pattern, re.IGNORECASE),
+                    )
+                except re.error as e:
+                    raise ValueError(f"Invalid exclude_regex pattern '{pattern}': {e}")  # noqa: E501
         if 'exclude_dirs' in data:
             config.exclude_dirs = data['exclude_dirs']
         if 'duplicate_strategy' in data:
@@ -549,19 +1397,46 @@ class TidyConfig:
             config.filters = FilterConfig.from_dict(data['filters'])  # type: ignore[arg-type]  # noqa: E501
         if 'collision' in data:
             config.collision = CollisionConfig.from_dict(data['collision'])  # type: ignore[arg-type]  # noqa: E501
+        if 'delete_mode' in data:
+            config.delete_mode = DeleteMode(data['delete_mode'])
         if 'undo_history_limit' in data:
             config.undo_history_limit = data['undo_history_limit']
+        if 'create_legacy_undo_file' in data:
+            config.create_legacy_undo_file = data['create_legacy_undo_file']
+        # Smart architecture features
+        if 'project_type' in data:
+            config.project_type = data['project_type']
+        if 'preset' in data:
+            config.preset = data['preset']
+        if 'detect_archives' in data:
+            config.detect_archives = data['detect_archives']
+        if 'detect_orphans' in data:
+            config.detect_orphans = data['detect_orphans']
+        if 'interactive' in data:
+            config.interactive = data['interactive']
+        if 'analyze_only' in data:
+            config.analyze_only = data['analyze_only']
         if 'rules' in data:
             config.rules = [
                 RoutingRule(
                     target=rule['target'],
                     pattern=rule.get('pattern'),
+                    regex=rule.get('regex'),
                     extensions=rule.get('extensions'),
                     glob=rule.get('glob'),
                 )
                 for rule in data['rules']
             ]
 
+        return config
+
+    @classmethod
+    def from_preset(cls, project_type: str, root_dir: Path | None = None) -> TidyConfig:  # noqa: E501
+        """Create config from a preset for the given project type."""
+        preset_data = get_preset(project_type)
+        config = cls.from_dict(preset_data, root_dir)  # type: ignore[arg-type]
+        config.project_type = project_type
+        config.preset = project_type
         return config
 
 
@@ -638,7 +1513,7 @@ class Logger:
 
 
 def load_config_file(config_path: Path | None = None) -> ConfigDict:
-    """Load configuration from file."""
+    """Load configuration from YAML file."""
     root_dir = Path.cwd()
 
     # If explicit config path provided, try to load it
@@ -646,7 +1521,7 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         full_path = root_dir / config_path
         if full_path.exists():
             with open(full_path, encoding='utf-8') as f:
-                data: ConfigDict = json.load(f)
+                data: ConfigDict = yaml.safe_load(f) or {}
                 return data
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -655,7 +1530,7 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         full_path = root_dir / filename
         if full_path.exists():
             with open(full_path, encoding='utf-8') as f:
-                data = json.load(f)
+                data = yaml.safe_load(f) or {}
                 return data
 
     return {}
@@ -754,6 +1629,11 @@ def should_exclude(filename: str, config: TidyConfig) -> tuple[bool, str | None]
     for pattern in config.exclude_patterns:
         if fnmatch.fnmatch(filename.lower(), pattern.lower()):
             return True, f"matches pattern: {pattern}"
+
+    # Check regex patterns
+    for regex in config._compiled_exclude_regex:
+        if regex.search(filename):
+            return True, f"matches regex: {regex.pattern}"
 
     return False, None
 
@@ -875,6 +1755,48 @@ def generate_unique_name(
     return result
 
 
+def trash_file(
+    file_path: Path,
+    delete_mode: DeleteMode = DeleteMode.TRASH,
+    logger: Logger | None = None,
+) -> tuple[bool, str]:
+    """Move a file to system trash or permanently delete it.
+
+    Args:
+        file_path: Path to the file to delete
+        delete_mode: TRASH (recoverable) or PERMANENT (unrecoverable)
+        logger: Optional logger for output
+
+    Returns:
+        Tuple of (success, error_message)
+    """
+    if not file_path.exists():
+        return False, f"File does not exist: {file_path}"
+
+    try:
+        if delete_mode == DeleteMode.TRASH:
+            if not TRASH_AVAILABLE:
+                return False, (
+                    "send2trash not installed. "
+                    "Install with: pip install send2trash"
+                )
+            send2trash(str(file_path))
+            if logger:
+                logger.verbose(f"Moved to trash: {file_path}")
+            return True, ""
+        else:
+            # Permanent delete
+            if file_path.is_dir():
+                shutil.rmtree(file_path)
+            else:
+                file_path.unlink()
+            if logger:
+                logger.verbose(f"Permanently deleted: {file_path}")
+            return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def get_target_for_file(
     file_path: Path, relative_path: str, config: TidyConfig,
 ) -> str:
@@ -932,6 +1854,7 @@ def collect_files(
 
 def save_undo_manifest(
     manifest: UndoManifest, root_dir: Path, history_limit: int = DEFAULT_UNDO_HISTORY_LIMIT,  # noqa: E501
+    create_legacy_file: bool = False,
 ) -> None:
     """Save the undo manifest to persistent history directory."""
     undo_dir = root_dir / UNDO_HISTORY_DIR
@@ -942,14 +1865,15 @@ def save_undo_manifest(
         manifest.manifest_id = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-%f')  # noqa: E501
 
     # Save to timestamped file
-    manifest_path = undo_dir / f"{manifest.manifest_id}.json"
+    manifest_path = undo_dir / f"{manifest.manifest_id}.yaml"
     with open(manifest_path, 'w', encoding='utf-8') as f:
-        json.dump(manifest.to_dict(), f, indent=2)
+        yaml.dump(manifest.to_dict(), f, default_flow_style=False, sort_keys=False)
 
-    # Also maintain legacy single file for backward compatibility
-    legacy_path = root_dir / UNDO_MANIFEST_FILE
-    with open(legacy_path, 'w', encoding='utf-8') as f:
-        json.dump(manifest.to_dict(), f, indent=2)
+    # Only create legacy single file if explicitly enabled
+    if create_legacy_file:
+        legacy_path = root_dir / UNDO_MANIFEST_FILE
+        with open(legacy_path, 'w', encoding='utf-8') as f:
+            yaml.dump(manifest.to_dict(), f, default_flow_style=False, sort_keys=False)
 
     # Cleanup old manifests beyond history limit
     _cleanup_undo_history(undo_dir, history_limit)
@@ -960,7 +1884,7 @@ def _cleanup_undo_history(undo_dir: Path, limit: int) -> None:
     if not undo_dir.exists():
         return
 
-    manifests = sorted(undo_dir.glob('*.json'), key=lambda p: p.name, reverse=True)  # noqa: E501
+    manifests = sorted(undo_dir.glob('*.yaml'), key=lambda p: p.name, reverse=True)  # noqa: E501
     for old_manifest in manifests[limit:]:
         try:
             old_manifest.unlink()
@@ -980,15 +1904,15 @@ def load_undo_manifest(
 
     if manifest_id:
         # Load specific manifest
-        manifest_path = undo_dir / f"{manifest_id}.json"
+        manifest_path = undo_dir / f"{manifest_id}.yaml"
         if not manifest_path.exists():
-            # Try with .json extension if not provided
+            # Try with .yaml extension if not provided
             manifest_path = undo_dir / f"{manifest_id}"
             if not manifest_path.exists():
                 return None
     elif undo_dir.exists():
         # Load most recent manifest from history directory
-        manifests = sorted(undo_dir.glob('*.json'), reverse=True)
+        manifests = sorted(undo_dir.glob('*.yaml'), reverse=True)
         if manifests:
             manifest_path = manifests[0]
         else:
@@ -1003,13 +1927,13 @@ def load_undo_manifest(
 
     try:
         with open(manifest_path, encoding='utf-8') as f:
-            data = json.load(f)
+            data = yaml.safe_load(f) or {}
         manifest = UndoManifest.from_dict(data)
         # Set manifest_id from filename if not present
         if not manifest.manifest_id and manifest_path.parent == undo_dir:
             manifest.manifest_id = manifest_path.stem
         return manifest
-    except (json.JSONDecodeError, KeyError):
+    except (yaml.YAMLError, KeyError):
         return None
 
 
@@ -1027,28 +1951,28 @@ def list_undo_manifests(root_dir: Path) -> list[tuple[str, str, int, bool]]:
         if legacy_path.exists():
             try:
                 with open(legacy_path, encoding='utf-8') as f:
-                    data = json.load(f)
+                    data = yaml.safe_load(f) or {}
                 manifests.append((
                     'legacy',
                     data.get('created_at', 'unknown'),
                     len(data.get('operations', [])),
                     data.get('dry_run', False),
                 ))
-            except (json.JSONDecodeError, KeyError):
+            except (yaml.YAMLError, KeyError):
                 pass
         return manifests
 
-    for manifest_path in sorted(undo_dir.glob('*.json'), reverse=True):
+    for manifest_path in sorted(undo_dir.glob('*.yaml'), reverse=True):
         try:
             with open(manifest_path, encoding='utf-8') as f:
-                data = json.load(f)
+                data = yaml.safe_load(f) or {}
             manifests.append((
                 manifest_path.stem,
                 data.get('created_at', 'unknown'),
                 len(data.get('operations', [])),
                 data.get('dry_run', False),
             ))
-        except (json.JSONDecodeError, KeyError):
+        except (yaml.YAMLError, KeyError):
             continue
 
     return manifests
@@ -1502,9 +2426,9 @@ def tidy(config: TidyConfig) -> TidyResult:
                         dest_rel = operation.destination.relative_to(config.root_dir)  # noqa: E501
                         dest_display = str(dest_rel)
                     except ValueError:
-                        dest_display = f"{target_dir_name}/{dest_name}"
+                        dest_display = f"{target_dir_name.rstrip('/')}/{dest_name}"
                 else:
-                    dest_display = f"{target_dir_name}/{dest_name}"
+                    dest_display = f"{target_dir_name.rstrip('/')}/{dest_name}"
                 display_path = relative_path if relative_path != filename else filename  # noqa: E501
                 logger.success(f"Moved: {display_path} → {dest_display}")
                 result.moved.append(operation)
@@ -1528,7 +2452,7 @@ def tidy(config: TidyConfig) -> TidyResult:
 
     # Save undo manifest (only if files were actually moved)
     if undo_manifest.operations:
-        save_undo_manifest(undo_manifest, config.root_dir, config.undo_history_limit)  # noqa: E501
+        save_undo_manifest(undo_manifest, config.root_dir, config.undo_history_limit, config.create_legacy_undo_file)  # noqa: E501
         if not config.dry_run:
             logger.verbose(f"Undo manifest saved to {UNDO_HISTORY_DIR}/")
 
@@ -1547,6 +2471,372 @@ def tidy(config: TidyConfig) -> TidyResult:
         logger.info(f"\n{Colors.BOLD}Summary:{Colors.RESET} {', '.join(summary_parts)}")  # noqa: E501
 
     return result
+
+
+# =============================================================================
+# Analysis and Interactive Features
+# =============================================================================
+
+@dataclass
+class AnalysisResult:
+    """Result of repository structure analysis."""
+
+    project_type: str
+    misplaced_files: list[tuple[Path, str, str]]  # (file, issue, suggestion)
+    archive_files: list[Path]
+    orphan_files: list[Path]
+    suggested_rules: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON output."""
+        return {
+            'project_type': self.project_type,
+            'misplaced_files': [
+                {'file': str(f), 'issue': i, 'suggestion': s}
+                for f, i, s in self.misplaced_files
+            ],
+            'archive_files': [str(f) for f in self.archive_files],
+            'orphan_files': [str(f) for f in self.orphan_files],
+            'suggested_rules': self.suggested_rules,
+        }
+
+
+def find_orphan_files(
+    files: list[Path],
+    root_dir: Path,
+    extensions_to_check: list[str] | None = None,
+) -> list[Path]:
+    """Find files that are not referenced anywhere in the codebase.
+
+    This checks for files that might be unused/forgotten.
+    """
+    orphans: list[Path] = []
+
+    # Extensions that are typically referenced in code
+    if extensions_to_check is None:
+        extensions_to_check = ['.md', '.txt', '.json', '.yaml', '.yml', '.png', '.jpg', '.svg']  # noqa: E501
+
+    # Code file extensions to search in
+    code_extensions = ['.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.java', '.rb', '.php', '.cs', '.md']  # noqa: E501
+
+    for file in files:
+        if file.suffix.lower() not in extensions_to_check:
+            continue
+
+        filename = file.name
+        stem = file.stem
+
+        # Search for references to this file
+        found = False
+        try:
+            for code_file in root_dir.rglob('*'):
+                if not code_file.is_file():
+                    continue
+                if code_file.suffix.lower() not in code_extensions:
+                    continue
+                if code_file == file:
+                    continue
+
+                # Skip large files
+                try:
+                    if code_file.stat().st_size > 1024 * 1024:  # 1MB limit
+                        continue
+                except OSError:
+                    continue
+
+                try:
+                    content = code_file.read_text(encoding='utf-8', errors='ignore')
+                    if filename in content or stem in content:
+                        found = True
+                        break
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+            if not found:
+                orphans.append(file)
+        except Exception:
+            pass  # Skip files that can't be checked
+
+    return orphans
+
+
+def analyze_repository(
+    root_dir: Path,
+    config: TidyConfig,
+    logger: Logger,
+) -> AnalysisResult:
+    """Analyze repository structure and identify issues.
+
+    Returns analysis of:
+    - Detected project type
+    - Files that might be misplaced
+    - Archive/backup files
+    - Orphaned files (if enabled)
+    - Suggested rules
+    """
+    # Detect project type with confidence
+    detection = detect_project_type_with_confidence(root_dir)
+    project_type = detection.project_type
+
+    confidence_color = {
+        DetectionConfidence.HIGH: Colors.GREEN,
+        DetectionConfidence.MEDIUM: Colors.CYAN,
+        DetectionConfidence.LOW: Colors.YELLOW,
+        DetectionConfidence.NONE: Colors.GRAY,
+    }.get(detection.confidence, Colors.RESET)
+
+    logger.info(
+        f"Detected project type: {Colors.CYAN}{project_type}{Colors.RESET} "
+        f"(confidence: {confidence_color}{detection.confidence.value}{Colors.RESET})"
+    )
+
+    if detection.markers_found:
+        logger.verbose(f"Markers found: {', '.join(detection.markers_found)}")
+
+    if detection.confidence == DetectionConfidence.LOW:
+        logger.warn(
+            "Low confidence detection. Consider using --preset to specify project type."
+        )
+
+    # Collect files to analyze
+    source_path = root_dir / config.source_dir
+    file_tuples = collect_files(source_path, config)
+
+    misplaced: list[tuple[Path, str, str]] = []
+    archives: list[Path] = []
+    orphans: list[Path] = []
+
+    logger.info(f"\nAnalyzing {len(file_tuples)} files...")
+
+    for file, relative_path in file_tuples:
+        filename = file.name
+
+        # Check for archive/backup files
+        if is_archive_file(filename):
+            archives.append(file)
+            misplaced.append((
+                file,
+                'archive_file',
+                "Move to archive/ directory or delete",
+            ))
+            continue
+
+        # Check if file should be in root
+        if is_root_file(filename, project_type):
+            # File is expected in root - check if it's NOT in root
+            try:
+                if len(file.relative_to(root_dir).parts) > 1:
+                    misplaced.append((
+                        file,
+                        'root_file_not_in_root',
+                        "This file typically belongs in the project root",
+                    ))
+            except ValueError:
+                pass  # File is not relative to root_dir
+            continue
+
+        # Check for test files not in test directory
+        if is_test_file(file, project_type):
+            conventions = LANGUAGE_CONVENTIONS.get(project_type, LANGUAGE_CONVENTIONS['generic'])  # noqa: E501
+            test_dirs = conventions.get('tests', ['tests/', 'test/'])
+            in_test_dir = any(
+                d.rstrip('/') in str(relative_path).lower()
+                for d in test_dirs
+            )
+            if not in_test_dir:
+                misplaced.append((
+                    file,
+                    'test_not_in_test_dir',
+                    f"Move to {test_dirs[0]} directory",
+                ))
+            continue
+
+        # Check documentation files
+        if file.suffix.lower() in ['.md', '.rst', '.txt', '.adoc']:
+            # Check if in source directory (usually not ideal)
+            conventions = LANGUAGE_CONVENTIONS.get(project_type, LANGUAGE_CONVENTIONS['generic'])  # noqa: E501
+            source_dirs = conventions.get('source', ['src/', 'lib/'])
+            in_source = any(
+                d.rstrip('/') in str(relative_path).lower()
+                for d in source_dirs
+            )
+            if in_source and file.parent != root_dir:
+                misplaced.append((
+                    file,
+                    'docs_in_source',
+                    "Consider moving to docs/ directory",
+                ))
+
+    # Find orphan files if enabled
+    if config.detect_orphans:
+        logger.info("Scanning for orphaned files...")
+        # Extract just the paths from the file_tuples
+        file_paths = [f for f, _ in file_tuples]
+        orphans = find_orphan_files(file_paths, root_dir)
+        for orphan in orphans:
+            if orphan not in [m[0] for m in misplaced]:
+                misplaced.append((
+                    orphan,
+                    'orphan_file',
+                    "File not referenced in codebase - consider archiving or deleting",  # noqa: E501
+                ))
+
+    # Generate suggested rules based on analysis
+    suggested_rules = generate_suggested_rules(root_dir, project_type, misplaced)
+
+    return AnalysisResult(
+        project_type=project_type,
+        misplaced_files=misplaced,
+        archive_files=archives,
+        orphan_files=orphans,
+        suggested_rules=suggested_rules,
+    )
+
+
+def generate_suggested_rules(
+    root_dir: Path,
+    project_type: str,
+    misplaced: list[tuple[Path, str, str]],
+) -> list[dict[str, Any]]:
+    """Generate suggested rules based on repository analysis."""
+    rules: list[dict[str, Any]] = []
+
+    # Count issues by type
+    issue_counts: dict[str, int] = {}
+    for _, issue, _ in misplaced:
+        issue_counts[issue] = issue_counts.get(issue, 0) + 1
+
+    # Suggest rules based on common issues
+    if issue_counts.get('archive_file', 0) > 0:
+        rules.append({
+            'comment': 'Move backup/archive files to archive directory',
+            'pattern': '*backup*',
+            'target': 'archive/',
+        })
+        rules.append({
+            'comment': 'Move old files to archive directory',
+            'pattern': '*.bak',
+            'target': 'archive/',
+        })
+
+    if issue_counts.get('docs_in_source', 0) > 0:
+        rules.append({
+            'comment': 'Move documentation to docs directory',
+            'extensions': ['.md', '.rst', '.txt'],
+            'target': 'docs/',
+        })
+
+    if issue_counts.get('test_not_in_test_dir', 0) > 0:
+        rules.append({
+            'comment': 'Move test files to tests directory',
+            'pattern': '*_test.py',
+            'target': 'tests/',
+        })
+        rules.append({
+            'comment': 'Move test files to tests directory',
+            'pattern': 'test_*.py',
+            'target': 'tests/',
+        })
+
+    # Add preset-based rules
+    preset = get_preset(project_type)
+    if preset:
+        rules.append({
+            'comment': f'Preset rules for {project_type} project',
+            'preset': project_type,
+        })
+
+    return rules
+
+
+def print_analysis_report(result: AnalysisResult, logger: Logger) -> None:
+    """Print a human-readable analysis report."""
+    logger.info(f"\n{Colors.BOLD}=== Repository Analysis Report ==={Colors.RESET}")
+    logger.info(f"Project type: {Colors.CYAN}{result.project_type}{Colors.RESET}")
+
+    if result.misplaced_files:
+        logger.info(f"\n{Colors.YELLOW}Potential Issues Found:{Colors.RESET}")
+        for file, issue, suggestion in result.misplaced_files:
+            issue_display = issue.replace('_', ' ').title()
+            logger.info(f"  • {file}")
+            logger.info(f"    Issue: {issue_display}")
+            logger.info(f"    Suggestion: {suggestion}")
+    else:
+        logger.success("\nNo issues found! Repository structure looks good.")
+
+    if result.archive_files:
+        logger.info(f"\n{Colors.YELLOW}Archive/Backup Files ({len(result.archive_files)}):{Colors.RESET}")  # noqa: E501
+        for f in result.archive_files[:10]:  # Show first 10
+            logger.info(f"  • {f}")
+        if len(result.archive_files) > 10:
+            logger.info(f"  ... and {len(result.archive_files) - 10} more")
+
+    if result.orphan_files:
+        logger.info(f"\n{Colors.YELLOW}Potentially Orphaned Files ({len(result.orphan_files)}):{Colors.RESET}")  # noqa: E501
+        for f in result.orphan_files[:10]:
+            logger.info(f"  • {f}")
+        if len(result.orphan_files) > 10:
+            logger.info(f"  ... and {len(result.orphan_files) - 10} more")
+
+    if result.suggested_rules:
+        logger.info(f"\n{Colors.CYAN}Suggested Configuration:{Colors.RESET}")
+        suggested_config = {
+            'project_type': result.project_type,
+            'rules': [r for r in result.suggested_rules if 'preset' not in r],
+        }
+        logger.info(yaml.dump(suggested_config, default_flow_style=False, sort_keys=False))
+
+
+def interactive_move(
+    file: Path,
+    suggested_target: Path,
+    config: TidyConfig,
+    logger: Logger,
+) -> str:
+    """Interactively prompt user for file move decision.
+
+    Returns: 'move', 'skip', 'custom', or 'quit'
+    """
+    print(f"\n{Colors.BOLD}File:{Colors.RESET} {file}")
+    print(f"{Colors.CYAN}Suggested target:{Colors.RESET} {suggested_target}")
+    print()
+    print("Options:")
+    print("  [m] Move to suggested target")
+    print("  [s] Skip this file")
+    print("  [c] Enter custom target")
+    print("  [a] Move all remaining (non-interactive)")
+    print("  [q] Quit")
+    print()
+
+    while True:
+        try:
+            choice = input(f"{Colors.BOLD}Choice [m/s/c/a/q]:{Colors.RESET} ").strip().lower()  # noqa: E501
+        except (EOFError, KeyboardInterrupt):
+            return 'quit'
+
+        if choice in ['m', 'move', '']:
+            return 'move'
+        elif choice in ['s', 'skip']:
+            return 'skip'
+        elif choice in ['c', 'custom']:
+            return 'custom'
+        elif choice in ['a', 'all']:
+            return 'all'
+        elif choice in ['q', 'quit']:
+            return 'quit'
+        else:
+            print("Invalid choice. Please enter m, s, c, a, or q.")
+
+
+def get_custom_target(config: TidyConfig) -> Path | None:
+    """Prompt user for custom target directory."""
+    try:
+        target = input(f"{Colors.BOLD}Enter target directory:{Colors.RESET} ").strip()
+        if not target:
+            return None
+        return config.root_dir / target
+    except (EOFError, KeyboardInterrupt):
+        return None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1574,7 +2864,7 @@ Examples:
   tidy --undo-id 20260121-103045-123456 # Undo specific operation
 
 Configuration Files:
-  .tidyrc.json, .tidyrc, tidy.config.json
+  .tidyrc.yaml, .tidyrc.yml, tidy.config.yaml
 
 Rule-based Routing (in config file):
   "rules": [
@@ -1593,7 +2883,7 @@ Rule-based Routing (in config file):
     parser.add_argument(
         '--config',
         type=Path,
-        help='Path to configuration file (default: .tidyrc.json)',
+        help='Path to configuration file (default: .tidyrc.yaml)',
     )
     parser.add_argument(
         '--source',
@@ -1682,6 +2972,19 @@ Rule-based Routing (in config file):
         help='Pattern for renamed files (default: {name}-{timestamp})',
     )
     parser.add_argument(
+        '--delete-mode',
+        dest='delete_mode',
+        choices=['trash', 'permanent'],
+        help='How to handle deletions: trash (recoverable) or permanent',
+    )
+    parser.add_argument(
+        '--trash',
+        dest='trash_files',
+        nargs='*',
+        metavar='FILE',
+        help='Move specified files to system trash',
+    )
+    parser.add_argument(
         '--dedup-by-content',
         dest='dedup_by_content',
         action='store_true',
@@ -1702,6 +3005,42 @@ Rule-based Routing (in config file):
         '--undo-id',
         dest='undo_id',
         help='Undo a specific operation by ID',
+    )
+    # Smart architecture features
+    parser.add_argument(
+        '--preset',
+        choices=['python', 'node', 'go', 'rust', 'java', 'ruby', 'php', 'dotnet',
+                 'swift', 'kotlin', 'scala', 'elixir', 'haskell', 'c_cpp',
+                 'terraform', 'docker', 'monorepo', 'generic'],
+        help='Use preset rules for project type (auto-detects if not specified)',
+    )
+    parser.add_argument(
+        '--show-detection',
+        dest='show_detection',
+        action='store_true',
+        help='Show project type detection details and exit',
+    )
+    parser.add_argument(
+        '--analyze',
+        action='store_true',
+        help='Analyze repo structure and suggest rules (no changes made)',
+    )
+    parser.add_argument(
+        '--detect-archives',
+        dest='detect_archives',
+        action='store_true',
+        help='Flag backup/archive files (e.g., *.bak, *backup*, *old*)',
+    )
+    parser.add_argument(
+        '--detect-orphans',
+        dest='detect_orphans',
+        action='store_true',
+        help='Flag files not referenced elsewhere in the codebase',
+    )
+    parser.add_argument(
+        '--interactive', '-i',
+        action='store_true',
+        help='Interactively confirm each file move',
     )
     parser.add_argument(
         '--dry-run',
@@ -1808,6 +3147,120 @@ def main(argv: list[str] | None = None) -> int:
         config.collision.keep = CollisionKeep(args.collision_keep)
     if args.rename_pattern:
         config.collision.rename_pattern = args.rename_pattern
+    if args.delete_mode:
+        config.delete_mode = DeleteMode(args.delete_mode)
+
+    # Handle --trash command (move files to trash)
+    if args.trash_files is not None:
+        logger = Logger(verbosity=config.verbosity, dry_run=config.dry_run)
+        files_to_trash = args.trash_files
+        if not files_to_trash:
+            # If no files specified, show help
+            print(f"{Colors.YELLOW}Usage:{Colors.RESET} tidy --trash FILE [FILE ...]")
+            print("Move files to system trash (recoverable)")
+            return 0
+
+        trashed = 0
+        failed = 0
+        for file_path in files_to_trash:
+            path = Path(file_path)
+            if not path.exists():
+                logger.error(f"File not found: {file_path}")
+                failed += 1
+                continue
+            if config.dry_run:
+                logger.success(f"Would trash: {file_path}")
+                trashed += 1
+            else:
+                success, error = trash_file(path, config.delete_mode, logger)
+                if success:
+                    status = "trashed" if config.delete_mode == DeleteMode.TRASH else "deleted"  # noqa: E501
+                    logger.success(f"{status.capitalize()}: {file_path}")
+                    trashed += 1
+                else:
+                    logger.error(f"Failed to trash {file_path}: {error}")
+                    failed += 1
+
+        print(f"\nSummary: {trashed} trashed, {failed} failed")
+        return 1 if failed > 0 else 0
+
+    # Handle --show-detection before other options
+    if args.show_detection:
+        detection = detect_project_type_with_confidence(config.root_dir)
+        confidence_symbol = {
+            DetectionConfidence.HIGH: f"{Colors.GREEN}✓ HIGH{Colors.RESET}",
+            DetectionConfidence.MEDIUM: f"{Colors.CYAN}◐ MEDIUM{Colors.RESET}",
+            DetectionConfidence.LOW: f"{Colors.YELLOW}⚠ LOW{Colors.RESET}",
+            DetectionConfidence.NONE: f"{Colors.GRAY}✗ NONE{Colors.RESET}",
+        }.get(detection.confidence, "UNKNOWN")
+
+        print(f"\n{Colors.BOLD}Project Type Detection{Colors.RESET}")
+        print(f"{'=' * 40}")
+        print(f"Detected type:  {Colors.CYAN}{detection.project_type}{Colors.RESET}")
+        print(f"Confidence:     {confidence_symbol}")
+        print(f"Markers found:  {', '.join(detection.markers_found) or 'none'}")
+
+        if detection.all_detected_types:
+            print(f"\n{Colors.BOLD}All Detected Types:{Colors.RESET}")
+            for ptype, conf, markers in detection.all_detected_types[:8]:
+                conf_label = {
+                    DetectionConfidence.HIGH: f"{Colors.GREEN}HIGH{Colors.RESET}",
+                    DetectionConfidence.MEDIUM: f"{Colors.CYAN}MEDIUM{Colors.RESET}",
+                    DetectionConfidence.LOW: f"{Colors.YELLOW}LOW{Colors.RESET}",
+                }.get(conf, "?")
+                print(f"  • {ptype:12} ({conf_label:20}) - {', '.join(markers[:3])}")
+
+        print(f"\n{Colors.BOLD}Available Presets:{Colors.RESET}")
+        presets_list = sorted(PRESETS.keys())
+        for i in range(0, len(presets_list), 6):
+            print(f"  {', '.join(presets_list[i:i+6])}")
+
+        print("\nUse --preset <type> to override auto-detection.\n")
+        return 0
+
+    # Apply smart architecture CLI overrides
+    if args.preset:
+        # Load preset and merge with existing config
+        preset_config = get_preset(args.preset)
+        for key, value in preset_config.items():
+            if key == 'filters' and isinstance(value, dict):
+                for fk, fv in value.items():
+                    setattr(config.filters, fk, fv)
+            elif hasattr(config, key):
+                setattr(config, key, value)
+        config.preset = args.preset
+        config.project_type = args.preset
+    if args.detect_archives:
+        config.detect_archives = True
+    if args.detect_orphans:
+        config.detect_orphans = True
+    if args.interactive:
+        config.interactive = True
+    if args.analyze:
+        config.analyze_only = True
+        config.dry_run = True  # Analyze implies dry run
+
+    # Create logger
+    logger = Logger(
+        verbosity=config.verbosity,
+        dry_run=config.dry_run or config.analyze_only,
+    )
+
+    # Handle analyze mode
+    if config.analyze_only:
+        try:
+            result = analyze_repository(config.root_dir, config, logger)
+            print_analysis_report(result, logger)
+
+            # Output JSON if verbose
+            if config.verbosity >= 2:
+                logger.info(f"\n{Colors.CYAN}JSON Output:{Colors.RESET}")
+                print(json.dumps(result.to_dict(), indent=2))
+
+            return 0 if not result.misplaced_files else 1
+        except Exception as e:
+            print(f"{Colors.RED}Error during analysis:{Colors.RESET} {e}", file=sys.stderr)  # noqa: E501
+            return 1
 
     # Handle undo-list command
     if args.undo_list:

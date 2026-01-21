@@ -43,27 +43,38 @@ tidy --undo
 
 ### Configuration
 
-Create a `.tidyrc.json` file in your project root:
+Create a `.tidyrc.yaml` file in your project root:
 
-```json
-{
-    "source_dir": ".",
-    "target_dir": "00-inbox",
-    "extensions": [".md", ".txt"],
-    "exclude_files": ["readme.md", "changelog.md"],
-    "exclude_patterns": ["*.config.*"],
-    "exclude_dirs": ["node_modules", ".git", "__pycache__"],
-    "duplicate_strategy": "rename",
-    "dedup_by_content": false,
-    "recursive": false,
-    "max_depth": null,
-    "rules": [
-        {"pattern": "*.test.md", "target": "tests/"},
-        {"pattern": "*.draft.*", "target": "drafts/"},
-        {"extensions": [".png", ".jpg"], "target": "assets/images/"},
-        {"glob": "docs/**/*.md", "target": "documentation/"}
-    ]
-}
+```yaml
+source_dir: "."
+target_dir: "00-inbox"
+extensions:
+  - ".md"
+  - ".txt"
+exclude_files:
+  - "readme.md"
+  - "changelog.md"
+exclude_patterns:
+  - "*.config.*"
+exclude_dirs:
+  - "node_modules"
+  - ".git"
+  - "__pycache__"
+duplicate_strategy: "rename"
+dedup_by_content: false
+recursive: false
+max_depth: null
+rules:
+  - pattern: "*.test.md"
+    target: "tests/"
+  - pattern: "*.draft.*"
+    target: "drafts/"
+  - extensions:
+      - ".png"
+      - ".jpg"
+    target: "assets/images/"
+  - glob: "docs/**/*.md"
+    target: "documentation/"
 ```
 
 ### Rule-based Routing
@@ -172,46 +183,44 @@ remote-sync --process-queue
 
 ### Configuration
 
-Create a `.remotesyncrc.json` file in your project root:
+Create a `.remotesyncrc.yaml` file in your project root:
 
-```json
-{
-    "remotes": {
-        "origin": {
-            "priority": 1,
-            "branches": ["*"],
-            "force_push": "block",
-            "retry": 3,
-            "timeout": 30
-        },
-        "github-mirror": {
-            "priority": 2,
-            "branches": ["main", "develop"],
-            "force_push": "warn"
-        },
-        "internal-server": {
-            "priority": 3,
-            "branches": ["main"],
-            "vpn": "corporate"
-        }
-    },
-    "vpn": {
-        "corporate": {
-            "connect_cmd": "networksetup -connectpppoeservice 'Corporate VPN'",
-            "disconnect_cmd": "networksetup -disconnectpppoeservice 'Corporate VPN'",
-            "check_cmd": "scutil --nc status 'Corporate VPN' | grep Connected",
-            "timeout": 30,
-            "auto_connect": true
-        }
-    },
-    "parallel": true,
-    "max_workers": 4,
-    "offline_queue": true,
-    "health_check_timeout": 5,
-    "retry_base_delay": 1.0,
-    "retry_max_delay": 30.0,
-    "auto_fetch": true
-}
+```yaml
+remotes:
+  origin:
+    priority: 1
+    branches:
+      - "*"
+    force_push: "block"
+    retry: 3
+    timeout: 30
+  github-mirror:
+    priority: 2
+    branches:
+      - "main"
+      - "develop"
+    force_push: "warn"
+  internal-server:
+    priority: 3
+    branches:
+      - "main"
+    vpn: "corporate"
+
+vpn:
+  corporate:
+    connect_cmd: "networksetup -connectpppoeservice 'Corporate VPN'"
+    disconnect_cmd: "networksetup -disconnectpppoeservice 'Corporate VPN'"
+    check_cmd: "scutil --nc status 'Corporate VPN' | grep Connected"
+    timeout: 30
+    auto_connect: true
+
+parallel: true
+max_workers: 4
+offline_queue: true
+health_check_timeout: 5
+retry_base_delay: 1.0
+retry_max_delay: 30.0
+auto_fetch: true
 ```
 
 ### Features
@@ -366,30 +375,27 @@ For deployment (non-git) targets, explicitly exclude `.git`:
 
 #### Configuration
 
-Add `sync_targets` to your `.remotesyncrc.json`:
+Add `sync_targets` to your `.remotesyncrc.yaml`:
 
-```json
-{
-    "sync_targets": {
-        "backup": {
-            "path": "/Volumes/Backup/projects/my-repo"
-        },
-        "nas": {
-            "path": "/mnt/nas/backups/my-repo",
-            "delete": true
-        },
-        "deploy-server": {
-            "host": "deploy.example.com",
-            "path": "/var/www/my-app",
-            "user": "deploy",
-            "ssh_key": "~/.ssh/deploy_key",
-            "exclude": [".git", ".env", "node_modules"],
-            "branch_mode": "specific",
-            "branch": "main",
-            "delete": true
-        }
-    }
-}
+```yaml
+sync_targets:
+  backup:
+    path: "/Volumes/Backup/projects/my-repo"
+  nas:
+    path: "/mnt/nas/backups/my-repo"
+    delete: true
+  deploy-server:
+    host: "deploy.example.com"
+    path: "/var/www/my-app"
+    user: "deploy"
+    ssh_key: "~/.ssh/deploy_key"
+    exclude:
+      - ".git"
+      - ".env"
+      - "node_modules"
+    branch_mode: "specific"
+    branch: "main"
+    delete: true
 ```
 
 #### Filesystem Target Options
@@ -513,25 +519,19 @@ Options:
 
 If you need to use custom paths for system binaries (e.g., different versions or non-standard locations), you can configure them:
 
-**For remote-sync** (`.remotesyncrc.json`):
-```json
-{
-    "binaries": {
-        "git": "/opt/homebrew/bin/git",
-        "rsync": "/usr/local/bin/rsync",
-        "ssh": "/usr/bin/ssh"
-    }
-}
+**For remote-sync** (`.remotesyncrc.yaml`):
+```yaml
+binaries:
+  git: "/opt/homebrew/bin/git"
+  rsync: "/usr/local/bin/rsync"
+  ssh: "/usr/bin/ssh"
 ```
 
-**For binary-track** (`.binariesrc.json`):
-```json
-{
-    "system_binaries": {
-        "git": "/opt/homebrew/bin/git",
-        "codesign": "/usr/local/bin/codesign"
-    }
-}
+**For binary-track** (`.binariesrc.yaml`):
+```yaml
+system_binaries:
+  git: "/opt/homebrew/bin/git"
+  codesign: "/usr/local/bin/codesign"
 ```
 
 **Supported binaries:**
@@ -602,5 +602,93 @@ remote-sync --clear-queue
 ```
 
 The queue persists in `.remote-sync-queue.json` and survives restarts.
+
+---
+
+## AI Fix - AI-Powered Linting Auto-Fixer
+
+Automatically fix linting errors using AI providers (GitHub Copilot CLI, Mistral Vibe, Ollama). Features smart model selection based on error complexity, iterative fixing, and batch processing.
+
+### Quick Start
+
+```bash
+# Check for errors only
+ai-fix --check
+
+# Auto-fix with confirmation prompts
+ai-fix --fix
+
+# Auto-fix everything without prompting
+ai-fix --fix --auto
+
+# Preview fixes without applying
+ai-fix --fix --dry-run
+
+# List available models
+ai-fix --list-models
+```
+
+### Smart Model Selection
+
+AI Fix automatically selects the optimal model based on error complexity:
+
+| Complexity | Example Errors | Copilot CLI | Vibe/Mistral |
+|------------|----------------|-------------|--------------|
+| **Simple** | Unused imports, formatting | claude-haiku-4.5 | devstral-small |
+| **Moderate** | Type hints, simple logic | claude-sonnet-4.5 | devstral-2 |
+| **Complex** | Security issues, bugs | claude-opus-4.5 | devstral-2 |
+
+Override with `--model MODEL` or configure per-complexity in `.aifixrc.yaml`.
+
+### Configuration
+
+Create `.aifixrc.yaml` in your project root:
+
+```yaml
+ai_provider: copilot-cli  # or: vibe, mistral, ollama
+
+providers:
+  copilot-cli:
+    timeout: 120
+    smart_model_selection: true
+  vibe:
+    api_key_env: MISTRAL_API_KEY
+  ollama:
+    host: http://localhost:11434
+
+linters:
+  ruff:
+    enabled: true
+  mypy:
+    enabled: true
+```
+
+### Pre-commit Integration
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: ai-fix
+        name: AI Auto-fix
+        entry: ai-fix --fix --auto
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+```
+
+### Supported Providers
+
+| Provider | Install | Requirements |
+|----------|---------|--------------|
+| **copilot-cli** | `brew install copilot-cli` | GitHub Copilot subscription |
+| **vibe** | `brew install mistralai/tap/vibe` | `MISTRAL_API_KEY` env var |
+| **mistral** | (API only) | `MISTRAL_API_KEY` env var |
+| **ollama** | `ollama serve` | Local Ollama running |
+
+### Supported Linters
+
+- **Python**: Ruff, mypy, Pylint
+- **JavaScript/TypeScript**: ESLint, tsc
 
 ---

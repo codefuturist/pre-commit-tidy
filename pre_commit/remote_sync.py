@@ -16,7 +16,7 @@ Usage:
     remote-sync [options]
 
 Options:
-    --config PATH       Path to configuration file (default: .remotesyncrc.json)
+    --config PATH       Path to configuration file (default: .remotesyncrc.yaml)
     --push              Push current branch to all configured remotes
     --push-all          Push all branches to their configured remotes
     --status            Show sync status dashboard
@@ -31,6 +31,11 @@ Options:
     --branch NAME       Target specific branch (default: current branch)
     --force             Allow force push (requires explicit flag)
     --no-parallel       Disable parallel pushing
+    --retry N           Retry count for push operations (default: 3)
+    --timeout SECS      Timeout in seconds for operations (default: 60)
+    --max-workers N     Maximum parallel workers (default: 4)
+    --no-offline-queue  Disable offline queuing of failed pushes
+    --branches PATTERNS Branch patterns to sync, comma-separated (default: *)
     --help              Show this help message
     --version           Show version number
 
@@ -45,8 +50,25 @@ Smart Defaults:
     - Offline queue: enabled (handles network issues)
     - Parallel push: enabled (faster)
 
+Pre-commit Integration:
+    Use remote-sync as a pre-commit hook without a config file:
+
+    # .pre-commit-config.yaml
+    - repo: local
+      hooks:
+      - id: remote-sync
+        name: remote-sync
+        entry: remote-sync --push
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [post-commit]
+
+    Customize via CLI args:
+        entry: remote-sync --push --remote origin,gitlab --branches main
+
 Configuration:
-    Optional .remotesyncrc.json file for customization:
+    Optional .remotesyncrc.yaml file for advanced customization:
 
     {
         "remotes": {
@@ -73,8 +95,18 @@ Configuration:
         "offline_queue": true,
         "health_check_timeout": 10,
         "auto_fetch": true,
-        "fetch_prune": true
+        "fetch_prune": true,
+        "binaries": {
+            "git": "/usr/local/bin/git",
+            "rsync": "/usr/local/bin/rsync",
+            "ssh": "/usr/bin/ssh"
+        }
     }
+
+    Custom Binary Paths:
+    - Override paths to git, rsync, and ssh binaries
+    - Useful when binaries are in non-standard locations
+    - Supports absolute paths
 
 Environment Variables:
     REMOTE_SYNC_PARALLEL        Set to 'false' to disable parallel push
@@ -83,6 +115,7 @@ Environment Variables:
     REMOTE_SYNC_OFFLINE_QUEUE   Set to 'true' to enable offline queue
     REMOTE_SYNC_MAX_WORKERS     Maximum parallel workers (default: 4)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -94,27 +127,26 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import as_completed
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from dataclasses import field
-from datetime import datetime
-from datetime import timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TypedDict
 
+import yaml
+
 # Version
-__version__ = '1.0.0'
+__version__ = "1.0.0"
 
 # Default configuration file names
-CONFIG_FILE_NAMES = ['.remotesyncrc.json', '.remotesyncrc', 'remote-sync.config.json']
+CONFIG_FILE_NAMES = [".remotesyncrc.yaml", ".remotesyncrc.yml", "remote-sync.config.yaml"]
 
 # Offline queue file
-QUEUE_FILE = '.remote-sync-queue.json'
+QUEUE_FILE = ".remote-sync-queue.json"
 
 # Lock file for queue operations
-QUEUE_LOCK_FILE = '.remote-sync-queue.lock'
+QUEUE_LOCK_FILE = ".remote-sync-queue.lock"
 
 # =============================================================================
 # Default Settings - Tuned for Real-World Usage
@@ -122,11 +154,11 @@ QUEUE_LOCK_FILE = '.remote-sync-queue.lock'
 
 # Remote defaults
 DEFAULT_REMOTE_PRIORITY = 1
-DEFAULT_REMOTE_BRANCHES = ['*']  # Sync all branches
-DEFAULT_FORCE_PUSH_POLICY = 'block'  # Safe default - prevent accidental force push
+DEFAULT_REMOTE_BRANCHES = ["*"]  # Sync all branches
+DEFAULT_FORCE_PUSH_POLICY = "block"  # Safe default - prevent accidental force push
 DEFAULT_REMOTE_RETRY = 3  # Retry count for push operations
 DEFAULT_REMOTE_TIMEOUT = 60  # Seconds - increased for large pushes
-DEFAULT_REMOTE_GROUP = 'default'
+DEFAULT_REMOTE_GROUP = "default"
 
 # Parallel execution
 DEFAULT_PARALLEL = True  # Enable parallel pushing for speed
@@ -158,88 +190,88 @@ DEFAULT_VPN_AUTO_CONNECT = True  # Auto-connect if remote is unreachable
 # Sync targets (filesystem/rsync)
 DEFAULT_SYNC_DELETE = False  # Don't delete extraneous files (safe default)
 DEFAULT_RSYNC_PORT = 22
-DEFAULT_RSYNC_OPTIONS = ['-avz', '--progress']  # Archive, verbose, compress
+DEFAULT_RSYNC_OPTIONS = ["-avz", "--progress"]  # Archive, verbose, compress
 
 # Known hosting providers - used for smart defaults
 KNOWN_HOSTS = {
-    'github.com': {
-        'name': 'GitHub',
-        'timeout': 60,
-        'retry': 3,
-        'force_push': 'block',
+    "github.com": {
+        "name": "GitHub",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
     },
-    'gitlab.com': {
-        'name': 'GitLab',
-        'timeout': 60,
-        'retry': 3,
-        'force_push': 'block',
+    "gitlab.com": {
+        "name": "GitLab",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
     },
-    'bitbucket.org': {
-        'name': 'Bitbucket',
-        'timeout': 60,
-        'retry': 3,
-        'force_push': 'block',
+    "bitbucket.org": {
+        "name": "Bitbucket",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
     },
-    'codeberg.org': {
-        'name': 'Codeberg',
-        'timeout': 60,
-        'retry': 3,
-        'force_push': 'block',
+    "codeberg.org": {
+        "name": "Codeberg",
+        "timeout": 60,
+        "retry": 3,
+        "force_push": "block",
     },
-    'sr.ht': {
-        'name': 'SourceHut',
-        'timeout': 90,  # SourceHut can be slower
-        'retry': 5,
-        'force_push': 'warn',
+    "sr.ht": {
+        "name": "SourceHut",
+        "timeout": 90,  # SourceHut can be slower
+        "retry": 5,
+        "force_push": "warn",
     },
 }
 
 # Backup remote patterns - auto-detected for higher retry counts
 BACKUP_REMOTE_PATTERNS = [
-    'backup*',
-    '*-backup',
-    '*-mirror',
-    'mirror*',
-    'archive*',
-    '*-archive',
+    "backup*",
+    "*-backup",
+    "*-mirror",
+    "mirror*",
+    "archive*",
+    "*-archive",
 ]
 
 
 class ForcePushPolicy(Enum):
     """Policy for handling force pushes."""
 
-    ALLOW = 'allow'
-    WARN = 'warn'
-    BLOCK = 'block'
+    ALLOW = "allow"
+    WARN = "warn"
+    BLOCK = "block"
 
 
 class PushStatus(Enum):
     """Status of a push operation."""
 
-    SUCCESS = 'success'
-    FAILED = 'failed'
-    SKIPPED = 'skipped'
-    QUEUED = 'queued'
-    BLOCKED = 'blocked'
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    QUEUED = "queued"
+    BLOCKED = "blocked"
 
 
 class RemoteStatus(Enum):
     """Status of a remote."""
 
-    REACHABLE = 'reachable'
-    UNREACHABLE = 'unreachable'
-    UNKNOWN = 'unknown'
+    REACHABLE = "reachable"
+    UNREACHABLE = "unreachable"
+    UNKNOWN = "unknown"
 
 
 class SyncState(Enum):
     """Sync state between local and remote."""
 
-    IN_SYNC = 'in_sync'
-    AHEAD = 'ahead'
-    BEHIND = 'behind'
-    DIVERGED = 'diverged'
-    NO_REMOTE = 'no_remote'
-    UNKNOWN = 'unknown'
+    IN_SYNC = "in_sync"
+    AHEAD = "ahead"
+    BEHIND = "behind"
+    DIVERGED = "diverged"
+    NO_REMOTE = "no_remote"
+    UNKNOWN = "unknown"
 
 
 class VpnConfigDict(TypedDict, total=False):
@@ -309,20 +341,20 @@ class ConfigDict(TypedDict, total=False):
 class SyncTargetType(Enum):
     """Type of sync target."""
 
-    FILESYSTEM = 'filesystem'
-    RSYNC = 'rsync'
+    FILESYSTEM = "filesystem"
+    RSYNC = "rsync"
 
 
 class BranchMode(Enum):
     """Branch switching mode for sync targets."""
 
-    KEEP = 'keep'  # Keep destination on its current branch
-    MATCH = 'match'  # Switch destination to same branch as source (default)
-    SPECIFIC = 'specific'  # Always use a specific branch
+    KEEP = "keep"  # Keep destination on its current branch
+    MATCH = "match"  # Switch destination to same branch as source (default)
+    SPECIFIC = "specific"  # Always use a specific branch
 
 
 # Default excludes for sync targets (does NOT exclude .git to preserve repo state)
-DEFAULT_SYNC_EXCLUDES = ['__pycache__', '*.pyc', '.DS_Store', '*.egg-info', '.tox', '.pytest_cache', 'node_modules', '.venv', 'venv']
+DEFAULT_SYNC_EXCLUDES = ["__pycache__", "*.pyc", ".DS_Store", "*.egg-info", ".tox", ".pytest_cache", "node_modules", ".venv", "venv"]
 
 
 @dataclass
@@ -334,13 +366,13 @@ class FilesystemTarget:
     exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
     delete: bool = DEFAULT_SYNC_DELETE  # Delete extraneous files in destination
     branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
-    branch: str = ''  # Target branch for "specific" mode
+    branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.FILESYSTEM
 
     @classmethod
     def from_dict(cls, name: str, data: FilesystemTargetDict) -> FilesystemTarget:
         """Create from dictionary."""
-        branch_mode_str = data.get('branch_mode', 'match')
+        branch_mode_str = data.get("branch_mode", "match")
         try:
             branch_mode = BranchMode(branch_mode_str)
         except ValueError:
@@ -348,11 +380,11 @@ class FilesystemTarget:
 
         return cls(
             name=name,
-            path=data.get('path', ''),
-            exclude=data.get('exclude', DEFAULT_SYNC_EXCLUDES.copy()),
-            delete=data.get('delete', DEFAULT_SYNC_DELETE),
+            path=data.get("path", ""),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
             branch_mode=branch_mode,
-            branch=data.get('branch', ''),
+            branch=data.get("branch", ""),
         )
 
 
@@ -363,27 +395,27 @@ class RsyncTarget:
     name: str
     host: str
     path: str
-    user: str = ''
+    user: str = ""
     port: int = DEFAULT_RSYNC_PORT
-    ssh_key: str = ''
+    ssh_key: str = ""
     exclude: list[str] = field(default_factory=lambda: DEFAULT_SYNC_EXCLUDES.copy())
     delete: bool = DEFAULT_SYNC_DELETE
     options: list[str] = field(default_factory=lambda: DEFAULT_RSYNC_OPTIONS.copy())
     branch_mode: BranchMode = BranchMode.MATCH  # Match source branch by default
-    branch: str = ''  # Target branch for "specific" mode
+    branch: str = ""  # Target branch for "specific" mode
     target_type: SyncTargetType = SyncTargetType.RSYNC
 
     @classmethod
     def from_dict(cls, name: str, data: RsyncTargetDict) -> RsyncTarget:
         """Create from dictionary."""
-        branch_mode_str = data.get('branch_mode', 'match')
+        branch_mode_str = data.get("branch_mode", "match")
         try:
             branch_mode = BranchMode(branch_mode_str)
         except ValueError:
             branch_mode = BranchMode.MATCH
 
         # Merge user options with defaults if provided, otherwise use defaults
-        user_options = data.get('options')
+        user_options = data.get("options")
         if user_options is not None:
             options = user_options  # User explicitly specified, use theirs
         else:
@@ -391,16 +423,16 @@ class RsyncTarget:
 
         return cls(
             name=name,
-            host=data.get('host', ''),
-            path=data.get('path', ''),
-            user=data.get('user', ''),
-            port=data.get('port', DEFAULT_RSYNC_PORT),
-            ssh_key=data.get('ssh_key', ''),
-            exclude=data.get('exclude', DEFAULT_SYNC_EXCLUDES.copy()),
-            delete=data.get('delete', DEFAULT_SYNC_DELETE),
+            host=data.get("host", ""),
+            path=data.get("path", ""),
+            user=data.get("user", ""),
+            port=data.get("port", DEFAULT_RSYNC_PORT),
+            ssh_key=data.get("ssh_key", ""),
+            exclude=data.get("exclude", DEFAULT_SYNC_EXCLUDES.copy()),
+            delete=data.get("delete", DEFAULT_SYNC_DELETE),
             options=options,
             branch_mode=branch_mode,
-            branch=data.get('branch', ''),
+            branch=data.get("branch", ""),
         )
 
     def get_rsync_destination(self) -> str:
@@ -423,7 +455,7 @@ class SyncTargetResult:
     name: str
     target_type: SyncTargetType
     success: bool
-    message: str = ''
+    message: str = ""
     files_transferred: int = 0
     bytes_transferred: int = 0
     duration: float = 0.0
@@ -436,7 +468,7 @@ class VpnConfig:
     name: str
     connect_cmd: str
     disconnect_cmd: str
-    check_cmd: str = ''  # Command to check if VPN is connected
+    check_cmd: str = ""  # Command to check if VPN is connected
     timeout: int = DEFAULT_VPN_TIMEOUT
     auto_connect: bool = DEFAULT_VPN_AUTO_CONNECT
 
@@ -445,11 +477,11 @@ class VpnConfig:
         """Create from dictionary."""
         return cls(
             name=name,
-            connect_cmd=data.get('connect_cmd', ''),
-            disconnect_cmd=data.get('disconnect_cmd', ''),
-            check_cmd=data.get('check_cmd', ''),
-            timeout=data.get('timeout', DEFAULT_VPN_TIMEOUT),
-            auto_connect=data.get('auto_connect', DEFAULT_VPN_AUTO_CONNECT),
+            connect_cmd=data.get("connect_cmd", ""),
+            disconnect_cmd=data.get("disconnect_cmd", ""),
+            check_cmd=data.get("check_cmd", ""),
+            timeout=data.get("timeout", DEFAULT_VPN_TIMEOUT),
+            auto_connect=data.get("auto_connect", DEFAULT_VPN_AUTO_CONNECT),
         )
 
 
@@ -470,14 +502,14 @@ class RemoteConfig:
     @classmethod
     def from_dict(cls, name: str, data: RemoteConfigDict) -> RemoteConfig:
         """Create from dictionary."""
-        force_push_str = data.get('force_push', DEFAULT_FORCE_PUSH_POLICY)
+        force_push_str = data.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
         try:
             force_push = ForcePushPolicy(force_push_str)
         except ValueError:
             force_push = ForcePushPolicy.BLOCK
 
         # Handle vpn field - can be string name or inline config
-        vpn_value = data.get('vpn')
+        vpn_value = data.get("vpn")
         vpn_name = None
         if isinstance(vpn_value, str):
             vpn_name = vpn_value
@@ -487,13 +519,13 @@ class RemoteConfig:
 
         return cls(
             name=name,
-            priority=data.get('priority', DEFAULT_REMOTE_PRIORITY),
-            branches=data.get('branches', DEFAULT_REMOTE_BRANCHES.copy()),
+            priority=data.get("priority", DEFAULT_REMOTE_PRIORITY),
+            branches=data.get("branches", DEFAULT_REMOTE_BRANCHES.copy()),
             force_push=force_push,
-            retry=data.get('retry', DEFAULT_REMOTE_RETRY),
-            timeout=data.get('timeout', DEFAULT_REMOTE_TIMEOUT),
-            group=data.get('group', DEFAULT_REMOTE_GROUP),
-            url=data.get('url'),
+            retry=data.get("retry", DEFAULT_REMOTE_RETRY),
+            timeout=data.get("timeout", DEFAULT_REMOTE_TIMEOUT),
+            group=data.get("group", DEFAULT_REMOTE_GROUP),
+            url=data.get("url"),
             vpn=vpn_name,
         )
 
@@ -505,9 +537,9 @@ class RemoteConfig:
         # Detect known hosting providers
         for host_pattern, host_config in KNOWN_HOSTS.items():
             if host_pattern in url:
-                config.timeout = host_config.get('timeout', DEFAULT_REMOTE_TIMEOUT)
-                config.retry = host_config.get('retry', DEFAULT_REMOTE_RETRY)
-                force_push_str = host_config.get('force_push', DEFAULT_FORCE_PUSH_POLICY)
+                config.timeout = host_config.get("timeout", DEFAULT_REMOTE_TIMEOUT)
+                config.retry = host_config.get("retry", DEFAULT_REMOTE_RETRY)
+                force_push_str = host_config.get("force_push", DEFAULT_FORCE_PUSH_POLICY)
                 config.force_push = ForcePushPolicy(force_push_str)
                 break
 
@@ -515,13 +547,13 @@ class RemoteConfig:
         for pattern in BACKUP_REMOTE_PATTERNS:
             if fnmatch.fnmatch(name.lower(), pattern.lower()):
                 config.retry = max(config.retry, 5)  # At least 5 retries for backups
-                config.group = 'backup'
+                config.group = "backup"
                 break
 
         # Give origin highest priority
-        if name == 'origin':
+        if name == "origin":
             config.priority = 1
-        elif name == 'upstream':
+        elif name == "upstream":
             config.priority = 2
 
         return config
@@ -548,13 +580,11 @@ class SyncConfig:
     dry_run: bool = False
     verbose: bool = False
     quiet: bool = False
-    binaries: dict[str, str] = field(
-        default_factory=lambda: {
-            'git': 'git',
-            'rsync': 'rsync',
-            'ssh': 'ssh',
-        },
-    )
+    binaries: dict[str, str] = field(default_factory=lambda: {
+        "git": "git",
+        "rsync": "rsync",
+        "ssh": "ssh",
+    })
 
     @classmethod
     def from_dict(cls, data: ConfigDict) -> SyncConfig:
@@ -564,22 +594,22 @@ class SyncConfig:
         sync_targets: dict[str, FilesystemTarget | RsyncTarget] = {}
 
         # Parse global VPN configurations
-        for vpn_name, vpn_data in data.get('vpn', {}).items():
+        for vpn_name, vpn_data in data.get("vpn", {}).items():
             vpn_configs[vpn_name] = VpnConfig.from_dict(vpn_name, vpn_data)
 
         # Parse remote configurations
-        for name, remote_data in data.get('remotes', {}).items():
+        for name, remote_data in data.get("remotes", {}).items():
             remotes[name] = RemoteConfig.from_dict(name, remote_data)
 
             # Handle inline VPN config in remote
-            vpn_value = remote_data.get('vpn')
+            vpn_value = remote_data.get("vpn")
             if isinstance(vpn_value, dict):
                 inline_vpn_name = f"_inline_{name}"
                 vpn_configs[inline_vpn_name] = VpnConfig.from_dict(inline_vpn_name, vpn_value)
 
         # Parse sync targets (filesystem and rsync)
-        for name, target_data in data.get('sync_targets', {}).items():
-            if 'host' in target_data:
+        for name, target_data in data.get("sync_targets", {}).items():
+            if "host" in target_data:
                 # It's an rsync target
                 sync_targets[name] = RsyncTarget.from_dict(name, target_data)  # type: ignore
             else:
@@ -587,25 +617,25 @@ class SyncConfig:
                 sync_targets[name] = FilesystemTarget.from_dict(name, target_data)  # type: ignore
 
         # Parse custom binary paths
-        default_binaries = {'git': 'git', 'rsync': 'rsync', 'ssh': 'ssh'}
+        default_binaries = {"git": "git", "rsync": "rsync", "ssh": "ssh"}
         binaries = default_binaries.copy()
-        binaries.update(data.get('binaries', {}))
+        binaries.update(data.get("binaries", {}))
 
         return cls(
             remotes=remotes,
             vpn_configs=vpn_configs,
             sync_targets=sync_targets,
-            parallel=data.get('parallel', DEFAULT_PARALLEL),
-            max_workers=data.get('max_workers', DEFAULT_MAX_WORKERS),
-            offline_queue=data.get('offline_queue', DEFAULT_OFFLINE_QUEUE),
-            health_check_timeout=data.get('health_check_timeout', DEFAULT_HEALTH_CHECK_TIMEOUT),
-            retry_base_delay=data.get('retry_base_delay', DEFAULT_RETRY_BASE_DELAY),
-            retry_max_delay=data.get('retry_max_delay', DEFAULT_RETRY_MAX_DELAY),
-            auto_fetch=data.get('auto_fetch', DEFAULT_AUTO_FETCH),
-            fetch_prune=data.get('fetch_prune', DEFAULT_FETCH_PRUNE),
-            push_tags=data.get('push_tags', DEFAULT_PUSH_TAGS),
-            queue_max_retries=data.get('queue_max_retries', DEFAULT_QUEUE_MAX_RETRIES),
-            queue_max_age_days=data.get('queue_max_age_days', DEFAULT_QUEUE_MAX_AGE_DAYS),
+            parallel=data.get("parallel", DEFAULT_PARALLEL),
+            max_workers=data.get("max_workers", DEFAULT_MAX_WORKERS),
+            offline_queue=data.get("offline_queue", DEFAULT_OFFLINE_QUEUE),
+            health_check_timeout=data.get("health_check_timeout", DEFAULT_HEALTH_CHECK_TIMEOUT),
+            retry_base_delay=data.get("retry_base_delay", DEFAULT_RETRY_BASE_DELAY),
+            retry_max_delay=data.get("retry_max_delay", DEFAULT_RETRY_MAX_DELAY),
+            auto_fetch=data.get("auto_fetch", DEFAULT_AUTO_FETCH),
+            fetch_prune=data.get("fetch_prune", DEFAULT_FETCH_PRUNE),
+            push_tags=data.get("push_tags", DEFAULT_PUSH_TAGS),
+            queue_max_retries=data.get("queue_max_retries", DEFAULT_QUEUE_MAX_RETRIES),
+            queue_max_age_days=data.get("queue_max_age_days", DEFAULT_QUEUE_MAX_AGE_DAYS),
             binaries=binaries,
         )
 
@@ -617,10 +647,10 @@ class PushResult:
     remote: str
     branch: str
     status: PushStatus
-    message: str = ''
+    message: str = ""
     duration: float = 0.0
     retries: int = 0
-    commit_sha: str = ''
+    commit_sha: str = ""
     vpn_used: str | None = None  # VPN name if VPN was used
 
 
@@ -630,7 +660,7 @@ class VpnResult:
 
     vpn_name: str
     connected: bool
-    message: str = ''
+    message: str = ""
     duration: float = 0.0
 
 
@@ -640,9 +670,9 @@ class HealthCheckResult:
 
     remote: str
     status: RemoteStatus
-    url: str = ''
+    url: str = ""
     latency_ms: float = 0.0
-    error: str = ''
+    error: str = ""
 
 
 @dataclass
@@ -652,8 +682,8 @@ class SyncStatusResult:
     remote: str
     branch: str
     state: SyncState
-    local_commit: str = ''
-    remote_commit: str = ''
+    local_commit: str = ""
+    remote_commit: str = ""
     ahead_count: int = 0
     behind_count: int = 0
 
@@ -667,29 +697,29 @@ class QueuedPush:
     commit_sha: str
     queued_at: str
     retries: int = 0
-    last_error: str = ''
+    last_error: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
-            'remote': self.remote,
-            'branch': self.branch,
-            'commit_sha': self.commit_sha,
-            'queued_at': self.queued_at,
-            'retries': self.retries,
-            'last_error': self.last_error,
+            "remote": self.remote,
+            "branch": self.branch,
+            "commit_sha": self.commit_sha,
+            "queued_at": self.queued_at,
+            "retries": self.retries,
+            "last_error": self.last_error,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> QueuedPush:
         """Create from dictionary."""
         return cls(
-            remote=data['remote'],
-            branch=data['branch'],
-            commit_sha=data['commit_sha'],
-            queued_at=data['queued_at'],
-            retries=data.get('retries', 0),
-            last_error=data.get('last_error', ''),
+            remote=data["remote"],
+            branch=data["branch"],
+            commit_sha=data["commit_sha"],
+            queued_at=data["queued_at"],
+            retries=data.get("retries", 0),
+            last_error=data.get("last_error", ""),
         )
 
 
@@ -698,24 +728,24 @@ class OfflineQueue:
     """Queue of push operations to retry later."""
 
     items: list[QueuedPush] = field(default_factory=list)
-    created_at: str = ''
-    updated_at: str = ''
+    created_at: str = ""
+    updated_at: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
-            'created_at': self.created_at,
-            'updated_at': self.updated_at,
-            'items': [item.to_dict() for item in self.items],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "items": [item.to_dict() for item in self.items],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> OfflineQueue:
         """Create from dictionary."""
         return cls(
-            items=[QueuedPush.from_dict(item) for item in data.get('items', [])],
-            created_at=data.get('created_at', ''),
-            updated_at=data.get('updated_at', ''),
+            items=[QueuedPush.from_dict(item) for item in data.get("items", [])],
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
         )
 
 
@@ -748,30 +778,30 @@ class SyncResult:
 class Colors:
     """ANSI color codes for terminal output."""
 
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
-    CYAN = '\033[36m'
-    WHITE = '\033[37m'
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
 
     @classmethod
     def disable(cls) -> None:
         """Disable colors for non-TTY output."""
-        cls.RESET = ''
-        cls.BOLD = ''
-        cls.DIM = ''
-        cls.RED = ''
-        cls.GREEN = ''
-        cls.YELLOW = ''
-        cls.BLUE = ''
-        cls.MAGENTA = ''
-        cls.CYAN = ''
-        cls.WHITE = ''
+        cls.RESET = ""
+        cls.BOLD = ""
+        cls.DIM = ""
+        cls.RED = ""
+        cls.GREEN = ""
+        cls.YELLOW = ""
+        cls.BLUE = ""
+        cls.MAGENTA = ""
+        cls.CYAN = ""
+        cls.WHITE = ""
 
 
 class Logger:
@@ -812,7 +842,7 @@ class Logger:
         if not self.quiet:
             print(f"\n{Colors.BOLD}{Colors.CYAN}{message}{Colors.RESET}")
 
-    def status_line(self, label: str, value: str, color: str = '') -> None:
+    def status_line(self, label: str, value: str, color: str = "") -> None:
         """Print a status line with label and value."""
         if not self.quiet:
             print(f"  {Colors.DIM}{label}:{Colors.RESET} {color}{value}{Colors.RESET}")
@@ -833,23 +863,23 @@ def set_global_config(config: SyncConfig) -> None:
 
 def get_git_binary() -> str:
     """Get the git binary path from config."""
-    if _global_config and 'git' in _global_config.binaries:
-        return _global_config.binaries['git']
-    return 'git'
+    if _global_config and "git" in _global_config.binaries:
+        return _global_config.binaries["git"]
+    return "git"
 
 
 def get_rsync_binary() -> str:
     """Get the rsync binary path from config."""
-    if _global_config and 'rsync' in _global_config.binaries:
-        return _global_config.binaries['rsync']
-    return 'rsync'
+    if _global_config and "rsync" in _global_config.binaries:
+        return _global_config.binaries["rsync"]
+    return "rsync"
 
 
 def get_ssh_binary() -> str:
     """Get the ssh binary path from config."""
-    if _global_config and 'ssh' in _global_config.binaries:
-        return _global_config.binaries['ssh']
-    return 'ssh'
+    if _global_config and "ssh" in _global_config.binaries:
+        return _global_config.binaries["ssh"]
+    return "ssh"
 
 
 def run_git_command(
@@ -871,17 +901,17 @@ def run_git_command(
     except subprocess.TimeoutExpired as e:
         # Return a fake result for timeout
         return subprocess.CompletedProcess(
-            cmd, 124, stdout='', stderr=f"Command timed out after {timeout}s",
+            cmd, 124, stdout="", stderr=f"Command timed out after {timeout}s"
         )
     except FileNotFoundError:
         return subprocess.CompletedProcess(
-            cmd, 127, stdout='', stderr='git command not found',
+            cmd, 127, stdout="", stderr="git command not found"
         )
 
 
 def get_current_branch() -> str | None:
     """Get the current git branch name."""
-    result = run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
+    result = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
     if result.returncode == 0:
         return result.stdout.strip()
     return None
@@ -889,7 +919,7 @@ def get_current_branch() -> str | None:
 
 def get_current_commit() -> str | None:
     """Get the current commit SHA."""
-    result = run_git_command(['rev-parse', 'HEAD'])
+    result = run_git_command(["rev-parse", "HEAD"])
     if result.returncode == 0:
         return result.stdout.strip()
     return None
@@ -897,7 +927,7 @@ def get_current_commit() -> str | None:
 
 def get_remote_commit(remote: str, branch: str) -> str | None:
     """Get the commit SHA of a remote branch."""
-    result = run_git_command(['rev-parse', f"{remote}/{branch}"])
+    result = run_git_command(["rev-parse", f"{remote}/{branch}"])
     if result.returncode == 0:
         return result.stdout.strip()
     return None
@@ -905,15 +935,15 @@ def get_remote_commit(remote: str, branch: str) -> str | None:
 
 def get_configured_remotes() -> list[str]:
     """Get list of configured git remotes."""
-    result = run_git_command(['remote'])
+    result = run_git_command(["remote"])
     if result.returncode == 0:
-        return [r.strip() for r in result.stdout.strip().split('\n') if r.strip()]
+        return [r.strip() for r in result.stdout.strip().split("\n") if r.strip()]
     return []
 
 
 def get_remote_url(remote: str) -> str | None:
     """Get the URL of a remote."""
-    result = run_git_command(['remote', 'get-url', remote])
+    result = run_git_command(["remote", "get-url", remote])
     if result.returncode == 0:
         return result.stdout.strip()
     return None
@@ -921,15 +951,15 @@ def get_remote_url(remote: str) -> str | None:
 
 def fetch_remote(remote: str, timeout: int = 30) -> bool:
     """Fetch from a remote."""
-    result = run_git_command(['fetch', remote], timeout=timeout)
+    result = run_git_command(["fetch", remote], timeout=timeout)
     return result.returncode == 0
 
 
 def is_force_push_required(remote: str, branch: str) -> bool:
     """Check if a force push would be required."""
     # Get local and remote commits
-    local_result = run_git_command(['rev-parse', branch])
-    remote_result = run_git_command(['rev-parse', f"{remote}/{branch}"])
+    local_result = run_git_command(["rev-parse", branch])
+    remote_result = run_git_command(["rev-parse", f"{remote}/{branch}"])
 
     if local_result.returncode != 0 or remote_result.returncode != 0:
         return False
@@ -941,7 +971,7 @@ def is_force_push_required(remote: str, branch: str) -> bool:
         return False
 
     # Check if remote commit is an ancestor of local
-    merge_base = run_git_command(['merge-base', local_commit, remote_commit])
+    merge_base = run_git_command(["merge-base", local_commit, remote_commit])
     if merge_base.returncode != 0:
         return True
 
@@ -957,7 +987,7 @@ def get_sync_state(remote: str, branch: str) -> tuple[SyncState, int, int]:
     """
     # First, try to get the comparison
     result = run_git_command(
-        ['rev-list', '--left-right', '--count', f"{branch}...{remote}/{branch}"],
+        ["rev-list", "--left-right", "--count", f"{branch}...{remote}/{branch}"]
     )
 
     if result.returncode != 0:
@@ -987,7 +1017,7 @@ def get_sync_state(remote: str, branch: str) -> tuple[SyncState, int, int]:
 def branch_matches_pattern(branch: str, patterns: list[str]) -> bool:
     """Check if a branch name matches any of the patterns."""
     for pattern in patterns:
-        if pattern == '*':
+        if pattern == "*":
             return True
         if fnmatch.fnmatch(branch, pattern):
             return True
@@ -995,11 +1025,12 @@ def branch_matches_pattern(branch: str, patterns: list[str]) -> bool:
 
 
 def load_config_file(config_path: Path | None = None) -> ConfigDict:
-    """Load configuration from file."""
+    """Load configuration from YAML file."""
     if config_path and config_path.exists():
         try:
-            return json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as e:
+            with open(config_path, encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+        except (yaml.YAMLError, OSError) as e:
             logger.warning(f"Failed to load config file {config_path}: {e}")
             return {}
 
@@ -1008,8 +1039,9 @@ def load_config_file(config_path: Path | None = None) -> ConfigDict:
         path = Path(name)
         if path.exists():
             try:
-                return json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError):
+                with open(path, encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+            except (yaml.YAMLError, OSError):
                 continue
 
     return {}
@@ -1019,22 +1051,22 @@ def load_env_config() -> ConfigDict:
     """Load configuration from environment variables."""
     config: ConfigDict = {}
 
-    parallel = os.environ.get('REMOTE_SYNC_PARALLEL', '').lower()
-    if parallel == 'false':
-        config['parallel'] = False
-    elif parallel == 'true':
-        config['parallel'] = True
+    parallel = os.environ.get("REMOTE_SYNC_PARALLEL", "").lower()
+    if parallel == "false":
+        config["parallel"] = False
+    elif parallel == "true":
+        config["parallel"] = True
 
-    offline_queue = os.environ.get('REMOTE_SYNC_OFFLINE_QUEUE', '').lower()
-    if offline_queue == 'true':
-        config['offline_queue'] = True
-    elif offline_queue == 'false':
-        config['offline_queue'] = False
+    offline_queue = os.environ.get("REMOTE_SYNC_OFFLINE_QUEUE", "").lower()
+    if offline_queue == "true":
+        config["offline_queue"] = True
+    elif offline_queue == "false":
+        config["offline_queue"] = False
 
-    max_workers = os.environ.get('REMOTE_SYNC_MAX_WORKERS')
+    max_workers = os.environ.get("REMOTE_SYNC_MAX_WORKERS")
     if max_workers:
         try:
-            config['max_workers'] = int(max_workers)
+            config["max_workers"] = int(max_workers)
         except ValueError:
             pass
 
@@ -1046,9 +1078,9 @@ def merge_configs(*configs: ConfigDict) -> ConfigDict:
     result: ConfigDict = {}
     for config in configs:
         for key, value in config.items():
-            if key == 'remotes' and 'remotes' in result:
+            if key == "remotes" and "remotes" in result:
                 # Deep merge remotes
-                result['remotes'].update(value)  # type: ignore
+                result["remotes"].update(value)  # type: ignore
             else:
                 result[key] = value  # type: ignore
     return result
@@ -1081,9 +1113,9 @@ def discover_remotes(config: SyncConfig) -> SyncConfig:
             remote_config = RemoteConfig(name=remote)
 
         # Set priority based on remote name and position
-        if remote == 'origin':
+        if remote == "origin":
             remote_config.priority = 1
-        elif remote == 'upstream':
+        elif remote == "upstream":
             remote_config.priority = 2
         else:
             # Other remotes get lower priority
@@ -1092,7 +1124,7 @@ def discover_remotes(config: SyncConfig) -> SyncConfig:
         config.remotes[remote] = remote_config
 
         if config.verbose:
-            host_info = ''
+            host_info = ""
             for host_pattern, host_data in KNOWN_HOSTS.items():
                 if url and host_pattern in url:
                     host_info = f" ({host_data['name']})"
@@ -1109,9 +1141,10 @@ def load_queue(queue_path: Path | None = None) -> OfflineQueue:
         return OfflineQueue()
 
     try:
-        data = json.loads(path.read_text())
+        with open(path, encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
         return OfflineQueue.from_dict(data)
-    except (json.JSONDecodeError, OSError):
+    except (yaml.YAMLError, OSError):
         return OfflineQueue()
 
 
@@ -1123,7 +1156,8 @@ def save_queue(queue: OfflineQueue, queue_path: Path | None = None) -> bool:
         queue.created_at = queue.updated_at
 
     try:
-        path.write_text(json.dumps(queue.to_dict(), indent=2))
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.dump(queue.to_dict(), f, default_flow_style=False, sort_keys=False)
         return True
     except OSError as e:
         logger.error(f"Failed to save queue: {e}")
@@ -1147,7 +1181,7 @@ def add_to_queue(
     remote: str,
     branch: str,
     commit_sha: str,
-    error: str = '',
+    error: str = "",
     queue_path: Path | None = None,
 ) -> None:
     """Add a failed push to the offline queue."""
@@ -1170,7 +1204,7 @@ def add_to_queue(
             commit_sha=commit_sha,
             queued_at=datetime.now(timezone.utc).isoformat(),
             last_error=error,
-        ),
+        )
     )
     save_queue(queue, queue_path)
 
@@ -1206,11 +1240,11 @@ def run_shell_command(
         return result
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
-            command, 124, stdout='', stderr=f"Command timed out after {timeout}s",
+            command, 124, stdout="", stderr=f"Command timed out after {timeout}s"
         )
     except Exception as e:
         return subprocess.CompletedProcess(
-            command, 1, stdout='', stderr=str(e),
+            command, 1, stdout="", stderr=str(e)
         )
 
 
@@ -1232,7 +1266,7 @@ def connect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=False,
-            message='No connect command configured',
+            message="No connect command configured",
         )
 
     # Check if already connected
@@ -1241,7 +1275,7 @@ def connect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=True,
-            message='Already connected',
+            message="Already connected",
         )
 
     if dry_run:
@@ -1269,7 +1303,7 @@ def connect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
                 return VpnResult(
                     vpn_name=vpn_config.name,
                     connected=False,
-                    message='VPN connect command succeeded but connection check failed',
+                    message="VPN connect command succeeded but connection check failed",
                     duration=round(duration, 2),
                 )
 
@@ -1277,11 +1311,11 @@ def connect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=True,
-            message='Connected successfully',
+            message="Connected successfully",
             duration=round(duration, 2),
         )
     else:
-        error_msg = result.stderr.strip() or result.stdout.strip() or 'Unknown error'
+        error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
         logger.error(f"Failed to connect VPN '{vpn_config.name}': {error_msg}")
         return VpnResult(
             vpn_name=vpn_config.name,
@@ -1299,7 +1333,7 @@ def disconnect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=True,  # Assume still connected since we can't disconnect
-            message='No disconnect command configured',
+            message="No disconnect command configured",
         )
 
     if dry_run:
@@ -1322,11 +1356,11 @@ def disconnect_vpn(vpn_config: VpnConfig, dry_run: bool = False) -> VpnResult:
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=False,
-            message='Disconnected successfully',
+            message="Disconnected successfully",
             duration=round(duration, 2),
         )
     else:
-        error_msg = result.stderr.strip() or 'Unknown error'
+        error_msg = result.stderr.strip() or "Unknown error"
         return VpnResult(
             vpn_name=vpn_config.name,
             connected=True,  # Assume still connected on failure
@@ -1398,7 +1432,7 @@ class VpnContext:
 
 def get_repo_root() -> Path | None:
     """Get the root directory of the git repository."""
-    result = run_git_command(['rev-parse', '--show-toplevel'])
+    result = run_git_command(["rev-parse", "--show-toplevel"])
     if result.returncode == 0:
         return Path(result.stdout.strip())
     return None
@@ -1407,10 +1441,10 @@ def get_repo_root() -> Path | None:
 def get_current_branch(repo_path: Path | None = None) -> str | None:
     """Get the current branch name of a git repository."""
     if repo_path is None:
-        result = run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
+        result = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
     else:
         result = subprocess.run(
-            [get_git_binary(), '-C', str(repo_path), 'rev-parse', '--abbrev-ref', 'HEAD'],
+            [get_git_binary(), "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1419,13 +1453,13 @@ def get_current_branch(repo_path: Path | None = None) -> str | None:
 
     if result.returncode == 0:
         branch = result.stdout.strip()
-        return branch if branch != 'HEAD' else None  # Detached HEAD
+        return branch if branch != "HEAD" else None  # Detached HEAD
     return None
 
 
 def is_git_repo(path: Path) -> bool:
     """Check if a path is a git repository."""
-    git_dir = path / '.git'
+    git_dir = path / ".git"
     return git_dir.exists() and (git_dir.is_dir() or git_dir.is_file())
 
 
@@ -1435,7 +1469,7 @@ def switch_branch_at_path(
     dry_run: bool = False,
 ) -> tuple[bool, str]:
     """Switch to a branch at a local git repository path.
-
+    
     Returns (success, message).
     """
     if not is_git_repo(repo_path):
@@ -1448,7 +1482,7 @@ def switch_branch_at_path(
 
     # First, try to checkout the branch
     result = subprocess.run(
-        [git_bin, '-C', str(repo_path), 'checkout', branch],
+        [git_bin, "-C", str(repo_path), "checkout", branch],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1460,10 +1494,10 @@ def switch_branch_at_path(
 
     # If checkout failed, maybe branch doesn't exist locally - try to fetch and checkout
     # First check if this is a tracking branch issue
-    if 'did not match any file' in result.stderr or 'pathspec' in result.stderr:
+    if "did not match any file" in result.stderr or "pathspec" in result.stderr:
         # Try to create tracking branch from origin
         fetch_result = subprocess.run(
-            [git_bin, '-C', str(repo_path), 'fetch', '--all'],
+            [git_bin, "-C", str(repo_path), "fetch", "--all"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -1472,7 +1506,7 @@ def switch_branch_at_path(
 
         # Try checkout again after fetch
         result = subprocess.run(
-            [git_bin, '-C', str(repo_path), 'checkout', branch],
+            [git_bin, "-C", str(repo_path), "checkout", branch],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1484,7 +1518,7 @@ def switch_branch_at_path(
 
         # Try creating a new tracking branch
         result = subprocess.run(
-            [git_bin, '-C', str(repo_path), 'checkout', '-b', branch, f"origin/{branch}"],
+            [git_bin, "-C", str(repo_path), "checkout", "-b", branch, f"origin/{branch}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1503,7 +1537,7 @@ def switch_branch_via_ssh(
     dry_run: bool = False,
 ) -> tuple[bool, str]:
     """Switch to a branch at a remote git repository via SSH.
-
+    
     Returns (success, message).
     """
     if dry_run:
@@ -1512,10 +1546,10 @@ def switch_branch_via_ssh(
     # Build SSH command
     ssh_cmd = [get_ssh_binary()]
     if target.port != 22:
-        ssh_cmd.extend(['-p', str(target.port)])
+        ssh_cmd.extend(["-p", str(target.port)])
     if target.ssh_key:
         key_path = Path(target.ssh_key).expanduser()
-        ssh_cmd.extend(['-i', str(key_path)])
+        ssh_cmd.extend(["-i", str(key_path)])
 
     ssh_cmd.append(target.get_ssh_host())
 
@@ -1542,15 +1576,15 @@ def switch_branch_via_ssh(
             check=False,
         )
 
-        if 'BRANCH_SWITCHED' in result.stdout:
+        if "BRANCH_SWITCHED" in result.stdout:
             return True, f"Switched remote to branch '{branch}'"
-        elif 'NOT_A_GIT_REPO' in result.stdout:
+        elif "NOT_A_GIT_REPO" in result.stdout:
             return False, f"Remote path is not a git repository: {target.path}"
         else:
             return False, f"Failed to switch branch: {result.stderr.strip()}"
 
     except subprocess.TimeoutExpired:
-        return False, 'SSH command timed out'
+        return False, "SSH command timed out"
     except Exception as e:
         return False, f"SSH error: {e}"
 
@@ -1576,7 +1610,7 @@ def sync_to_filesystem(
 ) -> SyncTargetResult:
     """Sync repository to a local filesystem location using rsync."""
     start_time = time.time()
-    branch_message = ''
+    branch_message = ""
 
     # Get source directory (repo root)
     if source_dir is None:
@@ -1586,7 +1620,7 @@ def sync_to_filesystem(
                 name=target.name,
                 target_type=SyncTargetType.FILESYSTEM,
                 success=False,
-                message='Could not determine repository root',
+                message="Could not determine repository root",
             )
 
     dest_path = Path(target.path).expanduser().resolve()
@@ -1624,15 +1658,15 @@ def sync_to_filesystem(
         )
 
     # Build rsync command for local sync
-    rsync_cmd = [get_rsync_binary(), '-av', '--progress']
+    rsync_cmd = [get_rsync_binary(), "-av", "--progress"]
 
     # Add delete flag if requested
     if target.delete:
-        rsync_cmd.append('--delete')
+        rsync_cmd.append("--delete")
 
     # Add exclude patterns
     for pattern in target.exclude:
-        rsync_cmd.extend(['--exclude', pattern])
+        rsync_cmd.extend(["--exclude", pattern])
 
     # Source and destination (trailing slash on source is important)
     rsync_cmd.append(f"{source_dir}/")
@@ -1655,10 +1689,10 @@ def sync_to_filesystem(
         if result.returncode == 0:
             # Parse rsync output for stats
             files_transferred = 0
-            for line in result.stdout.split('\n'):
-                if 'files transferred' in line.lower():
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
                     try:
-                        files_transferred = int(line.split(':')[1].strip().split()[0])
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
                     except (IndexError, ValueError):
                         pass
 
@@ -1672,7 +1706,7 @@ def sync_to_filesystem(
                 duration=round(duration, 2),
             )
         else:
-            error_msg = result.stderr.strip() or 'Unknown error'
+            error_msg = result.stderr.strip() or "Unknown error"
             logger.error(f"Filesystem sync failed: {error_msg}")
             return SyncTargetResult(
                 name=target.name,
@@ -1687,7 +1721,7 @@ def sync_to_filesystem(
             name=target.name,
             target_type=SyncTargetType.FILESYSTEM,
             success=False,
-            message='Sync timed out after 5 minutes',
+            message="Sync timed out after 5 minutes",
             duration=300.0,
         )
     except FileNotFoundError:
@@ -1695,7 +1729,7 @@ def sync_to_filesystem(
             name=target.name,
             target_type=SyncTargetType.FILESYSTEM,
             success=False,
-            message='rsync command not found. Please install rsync.',
+            message="rsync command not found. Please install rsync.",
         )
     except Exception as e:
         return SyncTargetResult(
@@ -1713,7 +1747,7 @@ def sync_to_rsync(
 ) -> SyncTargetResult:
     """Sync repository to a remote host using rsync over SSH."""
     start_time = time.time()
-    branch_message = ''
+    branch_message = ""
 
     # Get source directory (repo root)
     if source_dir is None:
@@ -1723,7 +1757,7 @@ def sync_to_rsync(
                 name=target.name,
                 target_type=SyncTargetType.RSYNC,
                 success=False,
-                message='Could not determine repository root',
+                message="Could not determine repository root",
             )
 
     if not target.host:
@@ -1731,7 +1765,7 @@ def sync_to_rsync(
             name=target.name,
             target_type=SyncTargetType.RSYNC,
             success=False,
-            message='No host specified for rsync target',
+            message="No host specified for rsync target",
         )
 
     if not target.path:
@@ -1739,7 +1773,7 @@ def sync_to_rsync(
             name=target.name,
             target_type=SyncTargetType.RSYNC,
             success=False,
-            message='No path specified for rsync target',
+            message="No path specified for rsync target",
         )
 
     # Handle branch switching via SSH if configured
@@ -1765,26 +1799,26 @@ def sync_to_rsync(
         )
 
     # Build rsync command
-    rsync_cmd = [get_rsync_binary(), '-avz', '--progress']
+    rsync_cmd = [get_rsync_binary(), "-avz", "--progress"]
 
     # Build SSH command with options
     ssh_cmd_parts = [get_ssh_binary()]
     if target.port != 22:
-        ssh_cmd_parts.extend(['-p', str(target.port)])
+        ssh_cmd_parts.extend(["-p", str(target.port)])
     if target.ssh_key:
         key_path = Path(target.ssh_key).expanduser()
-        ssh_cmd_parts.extend(['-i', str(key_path)])
+        ssh_cmd_parts.extend(["-i", str(key_path)])
 
     if len(ssh_cmd_parts) > 1:
-        rsync_cmd.extend(['-e', ' '.join(ssh_cmd_parts)])
+        rsync_cmd.extend(["-e", " ".join(ssh_cmd_parts)])
 
     # Add delete flag if requested
     if target.delete:
-        rsync_cmd.append('--delete')
+        rsync_cmd.append("--delete")
 
     # Add exclude patterns
     for pattern in target.exclude:
-        rsync_cmd.extend(['--exclude', pattern])
+        rsync_cmd.extend(["--exclude", pattern])
 
     # Add custom options
     rsync_cmd.extend(target.options)
@@ -1812,16 +1846,16 @@ def sync_to_rsync(
             # Parse rsync output for stats
             files_transferred = 0
             bytes_transferred = 0
-            for line in result.stdout.split('\n'):
-                if 'files transferred' in line.lower():
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
                     try:
-                        files_transferred = int(line.split(':')[1].strip().split()[0])
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
                     except (IndexError, ValueError):
                         pass
-                if 'total size' in line.lower():
+                if "total size" in line.lower():
                     try:
                         # Parse "total size is X" format
-                        size_str = line.split('is')[1].strip().split()[0].replace(',', '')
+                        size_str = line.split("is")[1].strip().split()[0].replace(",", "")
                         bytes_transferred = int(size_str)
                     except (IndexError, ValueError):
                         pass
@@ -1837,7 +1871,7 @@ def sync_to_rsync(
                 duration=round(duration, 2),
             )
         else:
-            error_msg = result.stderr.strip() or 'Unknown error'
+            error_msg = result.stderr.strip() or "Unknown error"
             logger.error(f"Rsync failed: {error_msg}")
             return SyncTargetResult(
                 name=target.name,
@@ -1852,7 +1886,7 @@ def sync_to_rsync(
             name=target.name,
             target_type=SyncTargetType.RSYNC,
             success=False,
-            message='Rsync timed out after 10 minutes',
+            message="Rsync timed out after 10 minutes",
             duration=600.0,
         )
     except FileNotFoundError:
@@ -1860,7 +1894,7 @@ def sync_to_rsync(
             name=target.name,
             target_type=SyncTargetType.RSYNC,
             success=False,
-            message='rsync command not found. Please install rsync.',
+            message="rsync command not found. Please install rsync.",
         )
     except Exception as e:
         return SyncTargetResult(
@@ -1876,16 +1910,16 @@ def check_rsync_target_health(target: RsyncTarget, timeout: int = 10) -> HealthC
     start_time = time.time()
 
     # Build SSH command to test connectivity
-    ssh_cmd = [get_ssh_binary(), '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5']
+    ssh_cmd = [get_ssh_binary(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 
     if target.port != 22:
-        ssh_cmd.extend(['-p', str(target.port)])
+        ssh_cmd.extend(["-p", str(target.port)])
     if target.ssh_key:
         key_path = Path(target.ssh_key).expanduser()
-        ssh_cmd.extend(['-i', str(key_path)])
+        ssh_cmd.extend(["-i", str(key_path)])
 
     host = f"{target.user}@{target.host}" if target.user else target.host
-    ssh_cmd.extend([host, 'echo', 'ok'])
+    ssh_cmd.extend([host, "echo", "ok"])
 
     try:
         result = subprocess.run(
@@ -1910,7 +1944,7 @@ def check_rsync_target_health(target: RsyncTarget, timeout: int = 10) -> HealthC
                 status=RemoteStatus.UNREACHABLE,
                 url=target.get_rsync_destination(),
                 latency_ms=round(latency, 2),
-                error=result.stderr.strip() or 'SSH connection failed',
+                error=result.stderr.strip() or "SSH connection failed",
             )
     except subprocess.TimeoutExpired:
         return HealthCheckResult(
@@ -1968,7 +2002,7 @@ def sync_to_targets(
     results: list[SyncTargetResult] = []
 
     if not config.sync_targets:
-        logger.info('No sync targets configured')
+        logger.info("No sync targets configured")
         return results
 
     # Filter targets if specified
@@ -1996,19 +2030,19 @@ def sync_to_targets(
 def print_sync_target_results(results: list[SyncTargetResult], dry_run: bool = False) -> None:
     """Print sync target results in a nice format."""
     if dry_run:
-        logger.header('[DRY RUN] Sync Target Results')
+        logger.header("[DRY RUN] Sync Target Results")
     else:
-        logger.header('Sync Target Results')
+        logger.header("Sync Target Results")
 
     for result in results:
         if result.success:
-            icon = '✓'
+            icon = "✓"
             color = Colors.GREEN
         else:
-            icon = '✗'
+            icon = "✗"
             color = Colors.RED
 
-        type_label = '📁' if result.target_type == SyncTargetType.FILESYSTEM else '🔄'
+        type_label = "📁" if result.target_type == SyncTargetType.FILESYSTEM else "🔄"
 
         print(f"  {color}{icon}{Colors.RESET} {type_label} {Colors.BOLD}{result.name}{Colors.RESET}")
         print(f"    {result.message}")
@@ -2024,8 +2058,8 @@ def print_sync_target_results(results: list[SyncTargetResult], dry_run: bool = F
     # Summary
     success_count = sum(1 for r in results if r.success)
     failed_count = sum(1 for r in results if not r.success)
-    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end='')
-    print(f"{Colors.GREEN}{success_count} succeeded{Colors.RESET}, ", end='')
+    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end="")
+    print(f"{Colors.GREEN}{success_count} succeeded{Colors.RESET}, ", end="")
     print(f"{Colors.RED}{failed_count} failed{Colors.RESET}")
 
 
@@ -2034,11 +2068,11 @@ def check_remote_health(
     timeout: int = 5,
 ) -> HealthCheckResult:
     """Check if a remote is reachable."""
-    url = get_remote_url(remote) or ''
+    url = get_remote_url(remote) or ""
     start_time = time.time()
 
     # Use ls-remote to check connectivity
-    result = run_git_command(['ls-remote', '--heads', remote], timeout=timeout)
+    result = run_git_command(["ls-remote", "--heads", remote], timeout=timeout)
     latency = (time.time() - start_time) * 1000  # Convert to ms
 
     if result.returncode == 0:
@@ -2068,7 +2102,7 @@ def check_all_remotes_health(
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
             futures = {
                 executor.submit(
-                    check_remote_health, remote, config.health_check_timeout,
+                    check_remote_health, remote, config.health_check_timeout
                 ): remote
                 for remote in config.remotes
             }
@@ -2091,9 +2125,9 @@ def push_to_remote(
 ) -> PushResult:
     """Push a branch to a remote with retry logic and optional VPN support."""
     start_time = time.time()
-    commit_sha = get_current_commit() or ''
+    commit_sha = get_current_commit() or ""
     retries = 0
-    last_error = ''
+    last_error = ""
     vpn_used = None
 
     # Check force push policy
@@ -2110,12 +2144,12 @@ def push_to_remote(
             logger.warning(f"Force push required for {remote}/{branch}")
 
     # Build push command
-    push_args = ['push', remote, branch]
+    push_args = ["push", remote, branch]
     if force:
-        push_args.insert(1, '--force-with-lease')
+        push_args.insert(1, "--force-with-lease")
 
     if dry_run:
-        vpn_msg = f" (via VPN '{vpn_config.name}')" if vpn_config else ''
+        vpn_msg = f" (via VPN '{vpn_config.name}')" if vpn_config else ""
         return PushResult(
             remote=remote,
             branch=branch,
@@ -2200,16 +2234,16 @@ def get_sync_status(
     branch: str,
 ) -> SyncStatusResult:
     """Get sync status for a remote/branch pair."""
-    local_commit = get_current_commit() or ''
-    remote_commit = get_remote_commit(remote, branch) or ''
+    local_commit = get_current_commit() or ""
+    remote_commit = get_remote_commit(remote, branch) or ""
     state, ahead, behind = get_sync_state(remote, branch)
 
     return SyncStatusResult(
         remote=remote,
         branch=branch,
         state=state,
-        local_commit=local_commit[:8] if local_commit else '',
-        remote_commit=remote_commit[:8] if remote_commit else '',
+        local_commit=local_commit[:8] if local_commit else "",
+        remote_commit=remote_commit[:8] if remote_commit else "",
         ahead_count=ahead,
         behind_count=behind,
     )
@@ -2228,13 +2262,13 @@ def sync_to_remotes(
     if branch is None:
         branch = get_current_branch()
         if not branch:
-            logger.error('Could not determine current branch')
+            logger.error("Could not determine current branch")
             return result
 
     # Filter remotes
     target_remotes = remotes or list(config.remotes.keys())
     if not target_remotes:
-        logger.warning('No remotes configured')
+        logger.warning("No remotes configured")
         return result
 
     # Sort by priority
@@ -2256,7 +2290,7 @@ def sync_to_remotes(
 
     # Auto-fetch if enabled
     if config.auto_fetch and not config.dry_run:
-        logger.debug('Fetching from remotes...')
+        logger.debug("Fetching from remotes...")
         for name, _ in matching_remotes:
             fetch_remote(name)
 
@@ -2271,7 +2305,7 @@ def sync_to_remotes(
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
             futures = {
                 executor.submit(
-                    push_to_remote, name, branch, cfg, force, config.dry_run, None,
+                    push_to_remote, name, branch, cfg, force, config.dry_run, None
                 ): name
                 for name, cfg in non_vpn_remotes
             }
@@ -2294,7 +2328,7 @@ def sync_to_remotes(
                             commit_sha=push_result.commit_sha,
                             queued_at=datetime.now(timezone.utc).isoformat(),
                             last_error=push_result.message,
-                        ),
+                        )
                     )
     else:
         for name, cfg in non_vpn_remotes:
@@ -2315,32 +2349,32 @@ def sync_to_remotes(
                         commit_sha=push_result.commit_sha,
                         queued_at=datetime.now(timezone.utc).isoformat(),
                         last_error=push_result.message,
-                    ),
+                    )
                 )
 
     # Push VPN remotes sequentially (VPN connections can conflict if parallelized)
     for name, cfg in vpn_remotes:
-        vpn_cfg = get_vpn_for_remote(cfg, config)
-        push_result = push_to_remote(name, branch, cfg, force, config.dry_run, vpn_cfg)
-        result.push_results.append(push_result)
+            vpn_cfg = get_vpn_for_remote(cfg, config)
+            push_result = push_to_remote(name, branch, cfg, force, config.dry_run, vpn_cfg)
+            result.push_results.append(push_result)
 
-        # Queue failed pushes
-        if push_result.status == PushStatus.FAILED and config.offline_queue:
-            add_to_queue(
-                push_result.remote,
-                push_result.branch,
-                push_result.commit_sha,
-                push_result.message,
-            )
-            result.queued.append(
-                QueuedPush(
-                    remote=push_result.remote,
-                    branch=push_result.branch,
-                    commit_sha=push_result.commit_sha,
-                    queued_at=datetime.now(timezone.utc).isoformat(),
-                    last_error=push_result.message,
-                ),
-            )
+            # Queue failed pushes
+            if push_result.status == PushStatus.FAILED and config.offline_queue:
+                add_to_queue(
+                    push_result.remote,
+                    push_result.branch,
+                    push_result.commit_sha,
+                    push_result.message,
+                )
+                result.queued.append(
+                    QueuedPush(
+                        remote=push_result.remote,
+                        branch=push_result.branch,
+                        commit_sha=push_result.commit_sha,
+                        queued_at=datetime.now(timezone.utc).isoformat(),
+                        last_error=push_result.message,
+                    )
+                )
 
     # Disconnect any VPNs that were connected
     disconnect_all_vpns(config.dry_run)
@@ -2354,7 +2388,7 @@ def process_queue(config: SyncConfig, force: bool = False) -> SyncResult:
     queue = load_queue()
 
     if not queue.items:
-        logger.info('Offline queue is empty')
+        logger.info("Offline queue is empty")
         return result
 
     logger.info(f"Processing {len(queue.items)} queued push(es)...")
@@ -2411,16 +2445,16 @@ def get_all_sync_statuses(config: SyncConfig, branch: str | None = None) -> list
 
 def print_health_check_results(results: list[HealthCheckResult]) -> None:
     """Print health check results in a nice format."""
-    logger.header('Remote Health Check')
+    logger.header("Remote Health Check")
 
     for result in results:
         if result.status == RemoteStatus.REACHABLE:
             status_color = Colors.GREEN
-            status_icon = '✓'
+            status_icon = "✓"
             status_text = f"reachable ({result.latency_ms:.0f}ms)"
         else:
             status_color = Colors.RED
-            status_icon = '✗'
+            status_icon = "✗"
             status_text = f"unreachable"
 
         print(f"  {status_color}{status_icon}{Colors.RESET} {Colors.BOLD}{result.remote}{Colors.RESET}")
@@ -2435,9 +2469,9 @@ def print_sync_status_dashboard(
     config: SyncConfig,
 ) -> None:
     """Print sync status dashboard."""
-    logger.header('Sync Status Dashboard')
+    logger.header("Sync Status Dashboard")
 
-    branch = statuses[0].branch if statuses else get_current_branch() or 'unknown'
+    branch = statuses[0].branch if statuses else get_current_branch() or "unknown"
     print(f"  Branch: {Colors.CYAN}{branch}{Colors.RESET}")
     print()
 
@@ -2452,32 +2486,32 @@ def print_sync_status_dashboard(
 
         # Determine color and icon based on state
         if status.state == SyncState.IN_SYNC:
-            icon = '✓'
+            icon = "✓"
             color = Colors.GREEN
-            state_text = 'in sync'
+            state_text = "in sync"
         elif status.state == SyncState.AHEAD:
-            icon = '↑'
+            icon = "↑"
             color = Colors.YELLOW
             state_text = f"ahead by {status.ahead_count} commit(s)"
         elif status.state == SyncState.BEHIND:
-            icon = '↓'
+            icon = "↓"
             color = Colors.YELLOW
             state_text = f"behind by {status.behind_count} commit(s)"
         elif status.state == SyncState.DIVERGED:
-            icon = '⚠'
+            icon = "⚠"
             color = Colors.RED
             state_text = f"diverged (+{status.ahead_count}/-{status.behind_count})"
         elif status.state == SyncState.NO_REMOTE:
-            icon = '○'
+            icon = "○"
             color = Colors.DIM
-            state_text = 'no remote branch'
+            state_text = "no remote branch"
         else:
-            icon = '?'
+            icon = "?"
             color = Colors.DIM
-            state_text = 'unknown'
+            state_text = "unknown"
 
         # Print remote status
-        print(f"  {color}{icon}{Colors.RESET} {Colors.BOLD}{status.remote}{Colors.RESET} ", end='')
+        print(f"  {color}{icon}{Colors.RESET} {Colors.BOLD}{status.remote}{Colors.RESET} ", end="")
         print(f"{Colors.DIM}(priority: {remote_config.priority}){Colors.RESET}")
         print(f"    State: {color}{state_text}{Colors.RESET}")
         if status.local_commit:
@@ -2490,22 +2524,22 @@ def print_sync_status_dashboard(
 def print_push_results(result: SyncResult) -> None:
     """Print push results summary."""
     if result.dry_run:
-        logger.header('[DRY RUN] Push Results')
+        logger.header("[DRY RUN] Push Results")
     else:
-        logger.header('Push Results')
+        logger.header("Push Results")
 
     for push in result.push_results:
         if push.status == PushStatus.SUCCESS:
-            icon = '✓'
+            icon = "✓"
             color = Colors.GREEN
         elif push.status == PushStatus.BLOCKED:
-            icon = '⊘'
+            icon = "⊘"
             color = Colors.YELLOW
         elif push.status == PushStatus.QUEUED:
-            icon = '⏳'
+            icon = "⏳"
             color = Colors.BLUE
         else:
-            icon = '✗'
+            icon = "✗"
             color = Colors.RED
 
         print(f"  {color}{icon}{Colors.RESET} {Colors.BOLD}{push.remote}/{push.branch}{Colors.RESET}")
@@ -2519,8 +2553,8 @@ def print_push_results(result: SyncResult) -> None:
         print()
 
     # Summary
-    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end='')
-    print(f"{Colors.GREEN}{result.success_count} succeeded{Colors.RESET}, ", end='')
+    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end="")
+    print(f"{Colors.GREEN}{result.success_count} succeeded{Colors.RESET}, ", end="")
     print(f"{Colors.RED}{result.failed_count} failed{Colors.RESET}")
 
     if result.queued:
@@ -2529,7 +2563,7 @@ def print_push_results(result: SyncResult) -> None:
 
 def print_queue_status(queue: OfflineQueue) -> None:
     """Print offline queue status."""
-    logger.header('Offline Queue')
+    logger.header("Offline Queue")
 
     if not queue.items:
         print(f"  {Colors.DIM}Queue is empty{Colors.RESET}")
@@ -2552,8 +2586,8 @@ def print_queue_status(queue: OfflineQueue) -> None:
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the CLI."""
     parser = argparse.ArgumentParser(
-        prog='remote-sync',
-        description='Keep multiple git remotes in sync automatically.',
+        prog="remote-sync",
+        description="Keep multiple git remotes in sync automatically.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2566,7 +2600,7 @@ Examples:
   remote-sync --sync-targets         Sync to filesystem/rsync targets
   remote-sync --sync-targets --target backup-nas  Sync to specific target
 
-Configuration file (.remotesyncrc.json):
+Configuration file (.remotesyncrc.yaml):
   {
     "remotes": {
       "origin": {"priority": 1, "branches": ["*"], "force_push": "block"},
@@ -2585,104 +2619,137 @@ Configuration file (.remotesyncrc.json):
     # Actions
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument(
-        '--push',
-        action='store_true',
-        help='Push current branch to all configured remotes',
+        "--push",
+        action="store_true",
+        help="Push current branch to all configured remotes",
     )
     action_group.add_argument(
-        '--push-all',
-        action='store_true',
-        help='Push all branches to their configured remotes',
+        "--push-all",
+        action="store_true",
+        help="Push all branches to their configured remotes",
     )
     action_group.add_argument(
-        '--status',
-        action='store_true',
-        help='Show sync status dashboard',
+        "--status",
+        action="store_true",
+        help="Show sync status dashboard",
     )
     action_group.add_argument(
-        '--health-check',
-        action='store_true',
-        help='Check connectivity to all remotes and sync targets',
+        "--health-check",
+        action="store_true",
+        help="Check connectivity to all remotes and sync targets",
     )
     action_group.add_argument(
-        '--process-queue',
-        action='store_true',
-        help='Process offline queue of failed pushes',
+        "--process-queue",
+        action="store_true",
+        help="Process offline queue of failed pushes",
     )
     action_group.add_argument(
-        '--clear-queue',
-        action='store_true',
-        help='Clear the offline queue',
+        "--clear-queue",
+        action="store_true",
+        help="Clear the offline queue",
     )
     action_group.add_argument(
-        '--show-queue',
-        action='store_true',
-        help='Show offline queue contents',
+        "--show-queue",
+        action="store_true",
+        help="Show offline queue contents",
     )
     action_group.add_argument(
-        '--sync-targets',
-        action='store_true',
-        help='Sync to configured filesystem/rsync targets',
+        "--sync-targets",
+        action="store_true",
+        help="Sync to configured filesystem/rsync targets",
     )
     action_group.add_argument(
-        '--sync-all',
-        action='store_true',
-        help='Push to remotes AND sync to targets',
+        "--sync-all",
+        action="store_true",
+        help="Push to remotes AND sync to targets",
     )
 
     # Options
     parser.add_argument(
-        '--config',
+        "--config",
         type=Path,
-        metavar='PATH',
-        help='Path to configuration file',
+        metavar="PATH",
+        help="Path to configuration file",
     )
     parser.add_argument(
-        '--remote',
+        "--remote",
         type=str,
-        metavar='NAME',
-        help='Target specific remote(s), comma-separated',
+        metavar="NAME",
+        help="Target specific remote(s), comma-separated",
     )
     parser.add_argument(
-        '--target',
+        "--target",
         type=str,
-        metavar='NAME',
-        help='Target specific sync target(s), comma-separated',
+        metavar="NAME",
+        help="Target specific sync target(s), comma-separated",
     )
     parser.add_argument(
-        '--branch',
+        "--branch",
         type=str,
-        metavar='NAME',
-        help='Target specific branch (default: current branch)',
+        metavar="NAME",
+        help="Target specific branch (default: current branch)",
     )
     parser.add_argument(
-        '--force',
-        action='store_true',
-        help='Allow force push (requires explicit flag)',
+        "--force",
+        action="store_true",
+        help="Allow force push (requires explicit flag)",
     )
     parser.add_argument(
-        '--no-parallel',
-        action='store_true',
-        help='Disable parallel pushing',
+        "--no-parallel",
+        action="store_true",
+        help="Disable parallel pushing",
     )
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Preview changes without executing',
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without executing",
     )
     parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Show detailed output',
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed output",
     )
     parser.add_argument(
-        '--quiet', '-q',
-        action='store_true',
-        help='Suppress all output except errors',
+        "--quiet", "-q",
+        action="store_true",
+        help="Suppress all output except errors",
     )
+
+    # Advanced options (override config file settings)
+    advanced_group = parser.add_argument_group("advanced options")
+    advanced_group.add_argument(
+        "--retry",
+        type=int,
+        metavar="N",
+        help="Retry count for push operations (default: 3, backup remotes: 5)",
+    )
+    advanced_group.add_argument(
+        "--timeout",
+        type=int,
+        metavar="SECS",
+        help="Timeout in seconds for push operations (default: 60)",
+    )
+    advanced_group.add_argument(
+        "--max-workers",
+        type=int,
+        metavar="N",
+        help="Maximum parallel workers (default: 4)",
+    )
+    advanced_group.add_argument(
+        "--no-offline-queue",
+        action="store_true",
+        help="Disable offline queuing of failed pushes",
+    )
+    advanced_group.add_argument(
+        "--branches",
+        type=str,
+        metavar="PATTERNS",
+        help="Branch patterns to sync, comma-separated (default: '*' for all)",
+    )
+
     parser.add_argument(
-        '--version',
-        action='version',
+        "--version",
+        action="version",
         version=f"%(prog)s {__version__}",
     )
 
@@ -2705,12 +2772,19 @@ def main(argv: list[str] | None = None) -> int:
     merged_config = merge_configs(file_config, env_config)
 
     config = SyncConfig.from_dict(merged_config)
-    config.dry_run = args.dry_run or os.environ.get('REMOTE_SYNC_DRY_RUN', '').lower() == 'true'
-    config.verbose = args.verbose or os.environ.get('REMOTE_SYNC_VERBOSE', '').lower() == 'true'
+    config.dry_run = args.dry_run or os.environ.get("REMOTE_SYNC_DRY_RUN", "").lower() == "true"
+    config.verbose = args.verbose or os.environ.get("REMOTE_SYNC_VERBOSE", "").lower() == "true"
     config.quiet = args.quiet
 
+    # Apply CLI overrides (highest priority)
     if args.no_parallel:
         config.parallel = False
+    if args.max_workers is not None:
+        config.max_workers = args.max_workers
+    if args.no_offline_queue:
+        config.offline_queue = False
+    if args.timeout is not None:
+        config.health_check_timeout = args.timeout
 
     # Set global config for binary paths
     set_global_config(config)
@@ -2722,10 +2796,20 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("No git remotes found. Add a remote with 'git remote add <name> <url>'")
         return 1
 
+    # Apply CLI overrides to all remotes (highest priority)
+    if args.retry is not None or args.timeout is not None or args.branches:
+        for remote in config.remotes.values():
+            if args.retry is not None:
+                remote.retry = args.retry
+            if args.timeout is not None:
+                remote.timeout = args.timeout
+            if args.branches:
+                remote.branches = [b.strip() for b in args.branches.split(",")]
+
     # Parse target remotes
     target_remotes = None
     if args.remote:
-        target_remotes = [r.strip() for r in args.remote.split(',')]
+        target_remotes = [r.strip() for r in args.remote.split(",")]
         # Validate remotes exist
         for remote in target_remotes:
             if remote not in config.remotes:
@@ -2736,20 +2820,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.health_check:
         results = check_all_remotes_health(config)
         print_health_check_results(results)
-
+        
         # Also check sync targets if configured
         if config.sync_targets:
-            logger.info('\n📁 Sync Target Health:')
+            logger.info("\n📁 Sync Target Health:")
             for target in config.sync_targets:
                 if target.type == SyncTargetType.FILESYSTEM:
                     healthy = check_filesystem_target_health(target)
-                    status = '✅' if healthy else '❌'
+                    status = "✅" if healthy else "❌"
                     logger.info(f"  {status} {target.name} → {target.path}")
                 elif target.type == SyncTargetType.RSYNC:
                     healthy = check_rsync_target_health(target)
-                    status = '✅' if healthy else '❌'
+                    status = "✅" if healthy else "❌"
                     logger.info(f"  {status} {target.name} → {target.host}:{target.path}")
-
+        
         # Return error if any remote is unreachable
         unreachable = [r for r in results if r.status == RemoteStatus.UNREACHABLE]
         return 1 if unreachable else 0
@@ -2757,7 +2841,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.status:
         statuses = get_all_sync_statuses(config, args.branch)
         if not statuses:
-            logger.error('Could not determine sync status')
+            logger.error("Could not determine sync status")
             return 1
         print_sync_status_dashboard(statuses, config)
 
@@ -2781,7 +2865,7 @@ def main(argv: list[str] | None = None) -> int:
 
     elif args.clear_queue:
         if clear_queue():
-            logger.success('Offline queue cleared')
+            logger.success("Offline queue cleared")
             return 0
         return 1
 
@@ -2794,12 +2878,12 @@ def main(argv: list[str] | None = None) -> int:
         # Parse target names
         target_names = None
         if args.target:
-            target_names = [t.strip() for t in args.target.split(',')]
-
+            target_names = [t.strip() for t in args.target.split(",")]
+        
         # Sync to configured sync targets (filesystem/rsync)
         results = sync_to_targets(config, target_names)
         print_sync_target_results(results, dry_run=config.dry_run)
-
+        
         # Return error if any sync failed
         failed = [r for r in results if not r.success]
         return 1 if failed else 0
@@ -2814,5 +2898,5 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -89,13 +90,14 @@ class TestLoadConfigFile:
 
     def test_load_existing_config(self, tmp_path: Path) -> None:
         """Test loading an existing config file."""
-        config_file = tmp_path / '.tidyrc.json'
+        config_file = tmp_path / '.tidyrc.yaml'
         config_data = {
             'source_dir': 'src',
             'target_dir': 'dest',
             'extensions': ['.md', '.txt'],
         }
-        config_file.write_text(json.dumps(config_data))
+        with open(config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(config_data, f)
 
         os.chdir(tmp_path)
         loaded = load_config_file()
@@ -802,7 +804,7 @@ class TestPersistentUndoHistory:
 
         undo_dir = tmp_path / UNDO_HISTORY_DIR
         assert undo_dir.exists()
-        assert len(list(undo_dir.glob('*.json'))) == 1
+        assert len(list(undo_dir.glob('*.yaml'))) == 1
 
         manifests = list_undo_manifests(tmp_path)
         assert len(manifests) == 1
@@ -825,7 +827,7 @@ class TestPersistentUndoHistory:
 
         undo_dir = tmp_path / UNDO_HISTORY_DIR
         # Should only keep 3 most recent
-        assert len(list(undo_dir.glob('*.json'))) == 3
+        assert len(list(undo_dir.glob('*.yaml'))) == 3
 
     def test_undo_specific_manifest(self, tmp_path: Path) -> None:
         """Test undoing a specific manifest by ID."""

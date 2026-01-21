@@ -513,6 +513,7 @@ Options:
 
 If you need to use custom paths for system binaries (e.g., different versions or non-standard locations), you can configure them:
 
+**For remote-sync** (`.remotesyncrc.json`):
 ```json
 {
     "binaries": {
@@ -523,16 +524,26 @@ If you need to use custom paths for system binaries (e.g., different versions or
 }
 ```
 
+**For binary-track** (`.binariesrc.json`):
+```json
+{
+    "system_binaries": {
+        "git": "/opt/homebrew/bin/git",
+        "codesign": "/usr/local/bin/codesign"
+    }
+}
+```
+
 **Supported binaries:**
-- `git`: Git binary (default: `git`)
-- `rsync`: Rsync binary (default: `rsync`)
-- `ssh`: SSH binary (default: `ssh`)
+- **remote-sync**: `git`, `rsync`, `ssh`
+- **binary-track**: `git`, `codesign`
 
 This is useful when:
 - Using a specific Git version for features/compatibility
 - Running in containerized environments with custom paths
 - Using alternative SSH implementations (e.g., Dropbear)
 - rsync installed via Homebrew or custom location
+- Using custom codesign implementations on macOS
 
 ### Pre-commit Hook Integration
 

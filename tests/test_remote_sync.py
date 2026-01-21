@@ -72,7 +72,7 @@ class TestRemoteConfig:
         assert config.branches == ["*"]
         assert config.force_push == ForcePushPolicy.BLOCK
         assert config.retry == 3
-        assert config.timeout == 30
+        assert config.timeout == 60  # Increased default for large pushes
         assert config.group == "default"
 
     def test_from_dict_full_config(self) -> None:
@@ -693,7 +693,7 @@ class TestVpnConfig:
         assert config.connect_cmd == ""
         assert config.disconnect_cmd == ""
         assert config.check_cmd == ""
-        assert config.timeout == 30
+        assert config.timeout == 60  # Increased default for VPN connections
         assert config.auto_connect is True
 
     def test_from_dict_full_config(self) -> None:

@@ -228,6 +228,8 @@ Create a `.remotesyncrc.json` file in your project root:
 | **Sync Dashboard** | Visual status of all remotes (ahead/behind/diverged) |
 | **Auto-Discovery** | Automatically detect configured git remotes |
 | **VPN Support** | Auto-connect VPN for remotes behind firewalls |
+| **Filesystem Sync** | Sync to local paths (external drives, NAS) via rsync |
+| **Rsync Targets** | Sync to remote servers via SSH + rsync |
 
 ### Remote Configuration Options
 
@@ -335,6 +337,79 @@ For remotes behind firewalls or on private networks, configure VPN auto-connecti
 }
 ```
 
+### Filesystem & Rsync Sync Targets
+
+In addition to git remotes, you can sync your repository to local filesystem paths or remote servers via rsync. This is useful for:
+- **Local backups**: External drives, NAS, other directories
+- **Remote backups**: Servers accessible via SSH
+- **Non-git destinations**: Deployment targets, shared folders
+
+#### Configuration
+
+Add `sync_targets` to your `.remotesyncrc.json`:
+
+```json
+{
+    "sync_targets": {
+        "external-drive": {
+            "path": "/Volumes/Backup/projects/my-repo",
+            "exclude": [".git", "__pycache__", "*.pyc", "node_modules"],
+            "delete": false
+        },
+        "nas": {
+            "path": "/mnt/nas/backups/my-repo",
+            "delete": true
+        },
+        "deploy-server": {
+            "host": "deploy.example.com",
+            "path": "/var/www/my-app",
+            "user": "deploy",
+            "port": 22,
+            "ssh_key": "~/.ssh/deploy_key",
+            "exclude": [".git", ".env", "node_modules"],
+            "delete": true
+        }
+    }
+}
+```
+
+#### Filesystem Target Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `path` | string | required | Local destination path |
+| `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
+| `delete` | bool | `false` | Delete files not in source |
+
+#### Rsync Target Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `host` | string | required | Remote hostname |
+| `path` | string | required | Remote destination path |
+| `user` | string | `""` | SSH username |
+| `port` | int | `22` | SSH port |
+| `ssh_key` | string | `""` | Path to SSH private key |
+| `exclude` | list | `[".git", "__pycache__", "*.pyc", ".DS_Store"]` | Patterns to exclude |
+| `delete` | bool | `false` | Delete files not in source |
+| `options` | list | `[]` | Additional rsync options |
+
+#### Usage
+
+```bash
+# Sync to all configured sync targets
+remote-sync --sync-targets
+
+# Sync to specific targets
+remote-sync --sync-targets --target backup,nas
+
+# Sync everything (remotes + targets)
+remote-sync --sync-all
+
+# Preview sync with dry-run
+remote-sync --sync-targets --dry-run
+```
+
 ### CLI Options
 
 ```
@@ -348,10 +423,13 @@ Actions (mutually exclusive):
   --process-queue     Process offline queue of failed pushes
   --clear-queue       Clear the offline queue
   --show-queue        Show offline queue contents
+  --sync-targets      Sync to filesystem/rsync targets
+  --sync-all          Sync to all remotes AND sync targets
 
 Options:
   --config PATH       Path to configuration file
   --remote NAME       Target specific remote(s), comma-separated
+  --target NAME       Target specific sync target(s), comma-separated
   --branch NAME       Target specific branch (default: current)
   --force             Allow force push (requires explicit flag)
   --no-parallel       Disable parallel pushing

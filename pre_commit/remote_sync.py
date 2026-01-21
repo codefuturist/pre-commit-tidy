@@ -142,6 +142,27 @@ class VpnConfigDict(TypedDict, total=False):
     auto_connect: bool
 
 
+class FilesystemTargetDict(TypedDict, total=False):
+    """Type definition for filesystem sync target."""
+
+    path: str
+    exclude: list[str]
+    delete: bool  # Delete extraneous files in destination
+
+
+class RsyncTargetDict(TypedDict, total=False):
+    """Type definition for rsync sync target."""
+
+    host: str
+    path: str
+    user: str
+    port: int
+    ssh_key: str
+    exclude: list[str]
+    delete: bool
+    options: list[str]  # Additional rsync options
+
+
 class RemoteConfigDict(TypedDict, total=False):
     """Type definition for remote configuration."""
 
@@ -167,6 +188,85 @@ class ConfigDict(TypedDict, total=False):
     retry_max_delay: float
     auto_fetch: bool
     vpn: dict[str, VpnConfigDict]  # Named VPN configurations
+    sync_targets: dict[str, FilesystemTargetDict | RsyncTargetDict]  # Filesystem/rsync targets
+
+
+class SyncTargetType(Enum):
+    """Type of sync target."""
+
+    FILESYSTEM = "filesystem"
+    RSYNC = "rsync"
+
+
+@dataclass
+class FilesystemTarget:
+    """Configuration for a local filesystem sync target."""
+
+    name: str
+    path: str
+    exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
+    delete: bool = False  # Delete extraneous files in destination
+    target_type: SyncTargetType = SyncTargetType.FILESYSTEM
+
+    @classmethod
+    def from_dict(cls, name: str, data: FilesystemTargetDict) -> FilesystemTarget:
+        """Create from dictionary."""
+        return cls(
+            name=name,
+            path=data.get("path", ""),
+            exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
+            delete=data.get("delete", False),
+        )
+
+
+@dataclass
+class RsyncTarget:
+    """Configuration for an rsync sync target."""
+
+    name: str
+    host: str
+    path: str
+    user: str = ""
+    port: int = 22
+    ssh_key: str = ""
+    exclude: list[str] = field(default_factory=lambda: [".git", "__pycache__", "*.pyc", ".DS_Store"])
+    delete: bool = False
+    options: list[str] = field(default_factory=list)  # Additional rsync options
+    target_type: SyncTargetType = SyncTargetType.RSYNC
+
+    @classmethod
+    def from_dict(cls, name: str, data: RsyncTargetDict) -> RsyncTarget:
+        """Create from dictionary."""
+        return cls(
+            name=name,
+            host=data.get("host", ""),
+            path=data.get("path", ""),
+            user=data.get("user", ""),
+            port=data.get("port", 22),
+            ssh_key=data.get("ssh_key", ""),
+            exclude=data.get("exclude", [".git", "__pycache__", "*.pyc", ".DS_Store"]),
+            delete=data.get("delete", False),
+            options=data.get("options", []),
+        )
+
+    def get_rsync_destination(self) -> str:
+        """Get the rsync destination string."""
+        if self.user:
+            return f"{self.user}@{self.host}:{self.path}"
+        return f"{self.host}:{self.path}"
+
+
+@dataclass
+class SyncTargetResult:
+    """Result of a sync target operation."""
+
+    name: str
+    target_type: SyncTargetType
+    success: bool
+    message: str = ""
+    files_transferred: int = 0
+    bytes_transferred: int = 0
+    duration: float = 0.0
 
 
 @dataclass
@@ -244,6 +344,7 @@ class SyncConfig:
 
     remotes: dict[str, RemoteConfig] = field(default_factory=dict)
     vpn_configs: dict[str, VpnConfig] = field(default_factory=dict)
+    sync_targets: dict[str, FilesystemTarget | RsyncTarget] = field(default_factory=dict)
     parallel: bool = True
     max_workers: int = 4
     offline_queue: bool = True
@@ -260,6 +361,7 @@ class SyncConfig:
         """Create from dictionary."""
         remotes = {}
         vpn_configs = {}
+        sync_targets: dict[str, FilesystemTarget | RsyncTarget] = {}
 
         # Parse global VPN configurations
         for vpn_name, vpn_data in data.get("vpn", {}).items():
@@ -275,9 +377,19 @@ class SyncConfig:
                 inline_vpn_name = f"_inline_{name}"
                 vpn_configs[inline_vpn_name] = VpnConfig.from_dict(inline_vpn_name, vpn_value)
 
+        # Parse sync targets (filesystem and rsync)
+        for name, target_data in data.get("sync_targets", {}).items():
+            if "host" in target_data:
+                # It's an rsync target
+                sync_targets[name] = RsyncTarget.from_dict(name, target_data)  # type: ignore
+            else:
+                # It's a filesystem target
+                sync_targets[name] = FilesystemTarget.from_dict(name, target_data)  # type: ignore
+
         return cls(
             remotes=remotes,
             vpn_configs=vpn_configs,
+            sync_targets=sync_targets,
             parallel=data.get("parallel", True),
             max_workers=data.get("max_workers", 4),
             offline_queue=data.get("offline_queue", True),
@@ -1017,6 +1129,449 @@ class VpnContext:
         return None
 
 
+# =============================================================================
+# Filesystem and Rsync Sync Functions
+# =============================================================================
+
+
+def get_repo_root() -> Path | None:
+    """Get the root directory of the git repository."""
+    result = run_git_command(["rev-parse", "--show-toplevel"])
+    if result.returncode == 0:
+        return Path(result.stdout.strip())
+    return None
+
+
+def sync_to_filesystem(
+    target: FilesystemTarget,
+    source_dir: Path | None = None,
+    dry_run: bool = False,
+) -> SyncTargetResult:
+    """Sync repository to a local filesystem location using rsync."""
+    start_time = time.time()
+
+    # Get source directory (repo root)
+    if source_dir is None:
+        source_dir = get_repo_root()
+        if source_dir is None:
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=False,
+                message="Could not determine repository root",
+            )
+
+    dest_path = Path(target.path).expanduser().resolve()
+
+    # Validate destination
+    if not dest_path.parent.exists():
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message=f"Parent directory does not exist: {dest_path.parent}",
+        )
+
+    if dry_run:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=True,
+            message=f"[DRY RUN] Would sync to {dest_path}",
+        )
+
+    # Build rsync command for local sync
+    rsync_cmd = ["rsync", "-av", "--progress"]
+
+    # Add delete flag if requested
+    if target.delete:
+        rsync_cmd.append("--delete")
+
+    # Add exclude patterns
+    for pattern in target.exclude:
+        rsync_cmd.extend(["--exclude", pattern])
+
+    # Source and destination (trailing slash on source is important)
+    rsync_cmd.append(f"{source_dir}/")
+    rsync_cmd.append(str(dest_path))
+
+    logger.info(f"Syncing to filesystem: {dest_path}")
+    logger.debug(f"Command: {' '.join(rsync_cmd)}")
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+            check=False,
+        )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            # Parse rsync output for stats
+            files_transferred = 0
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
+                    try:
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
+                    except (IndexError, ValueError):
+                        pass
+
+            logger.success(f"Synced to {dest_path} in {duration:.1f}s")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=True,
+                message=f"Successfully synced to {dest_path}",
+                files_transferred=files_transferred,
+                duration=round(duration, 2),
+            )
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            logger.error(f"Filesystem sync failed: {error_msg}")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.FILESYSTEM,
+                success=False,
+                message=error_msg,
+                duration=round(duration, 2),
+            )
+
+    except subprocess.TimeoutExpired:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message="Sync timed out after 5 minutes",
+            duration=300.0,
+        )
+    except FileNotFoundError:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message="rsync command not found. Please install rsync.",
+        )
+    except Exception as e:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.FILESYSTEM,
+            success=False,
+            message=str(e),
+        )
+
+
+def sync_to_rsync(
+    target: RsyncTarget,
+    source_dir: Path | None = None,
+    dry_run: bool = False,
+) -> SyncTargetResult:
+    """Sync repository to a remote host using rsync over SSH."""
+    start_time = time.time()
+
+    # Get source directory (repo root)
+    if source_dir is None:
+        source_dir = get_repo_root()
+        if source_dir is None:
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=False,
+                message="Could not determine repository root",
+            )
+
+    if not target.host:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="No host specified for rsync target",
+        )
+
+    if not target.path:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="No path specified for rsync target",
+        )
+
+    if dry_run:
+        dest = target.get_rsync_destination()
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=True,
+            message=f"[DRY RUN] Would rsync to {dest}",
+        )
+
+    # Build rsync command
+    rsync_cmd = ["rsync", "-avz", "--progress"]
+
+    # Build SSH command with options
+    ssh_cmd_parts = ["ssh"]
+    if target.port != 22:
+        ssh_cmd_parts.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd_parts.extend(["-i", str(key_path)])
+
+    if len(ssh_cmd_parts) > 1:
+        rsync_cmd.extend(["-e", " ".join(ssh_cmd_parts)])
+
+    # Add delete flag if requested
+    if target.delete:
+        rsync_cmd.append("--delete")
+
+    # Add exclude patterns
+    for pattern in target.exclude:
+        rsync_cmd.extend(["--exclude", pattern])
+
+    # Add custom options
+    rsync_cmd.extend(target.options)
+
+    # Source and destination
+    rsync_cmd.append(f"{source_dir}/")
+    rsync_cmd.append(target.get_rsync_destination())
+
+    dest = target.get_rsync_destination()
+    logger.info(f"Syncing via rsync to: {dest}")
+    logger.debug(f"Command: {' '.join(rsync_cmd)}")
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout for remote sync
+            check=False,
+        )
+
+        duration = time.time() - start_time
+
+        if result.returncode == 0:
+            # Parse rsync output for stats
+            files_transferred = 0
+            bytes_transferred = 0
+            for line in result.stdout.split("\n"):
+                if "files transferred" in line.lower():
+                    try:
+                        files_transferred = int(line.split(":")[1].strip().split()[0])
+                    except (IndexError, ValueError):
+                        pass
+                if "total size" in line.lower():
+                    try:
+                        # Parse "total size is X" format
+                        size_str = line.split("is")[1].strip().split()[0].replace(",", "")
+                        bytes_transferred = int(size_str)
+                    except (IndexError, ValueError):
+                        pass
+
+            logger.success(f"Rsync to {dest} completed in {duration:.1f}s")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=True,
+                message=f"Successfully synced to {dest}",
+                files_transferred=files_transferred,
+                bytes_transferred=bytes_transferred,
+                duration=round(duration, 2),
+            )
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            logger.error(f"Rsync failed: {error_msg}")
+            return SyncTargetResult(
+                name=target.name,
+                target_type=SyncTargetType.RSYNC,
+                success=False,
+                message=error_msg,
+                duration=round(duration, 2),
+            )
+
+    except subprocess.TimeoutExpired:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="Rsync timed out after 10 minutes",
+            duration=600.0,
+        )
+    except FileNotFoundError:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message="rsync command not found. Please install rsync.",
+        )
+    except Exception as e:
+        return SyncTargetResult(
+            name=target.name,
+            target_type=SyncTargetType.RSYNC,
+            success=False,
+            message=str(e),
+        )
+
+
+def check_rsync_target_health(target: RsyncTarget, timeout: int = 10) -> HealthCheckResult:
+    """Check if an rsync target is reachable via SSH."""
+    start_time = time.time()
+
+    # Build SSH command to test connectivity
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+    if target.port != 22:
+        ssh_cmd.extend(["-p", str(target.port)])
+    if target.ssh_key:
+        key_path = Path(target.ssh_key).expanduser()
+        ssh_cmd.extend(["-i", str(key_path)])
+
+    host = f"{target.user}@{target.host}" if target.user else target.host
+    ssh_cmd.extend([host, "echo", "ok"])
+
+    try:
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        latency = (time.time() - start_time) * 1000
+
+        if result.returncode == 0:
+            return HealthCheckResult(
+                remote=target.name,
+                status=RemoteStatus.REACHABLE,
+                url=target.get_rsync_destination(),
+                latency_ms=round(latency, 2),
+            )
+        else:
+            return HealthCheckResult(
+                remote=target.name,
+                status=RemoteStatus.UNREACHABLE,
+                url=target.get_rsync_destination(),
+                latency_ms=round(latency, 2),
+                error=result.stderr.strip() or "SSH connection failed",
+            )
+    except subprocess.TimeoutExpired:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=target.get_rsync_destination(),
+            error=f"Connection timed out after {timeout}s",
+        )
+    except Exception as e:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=target.get_rsync_destination(),
+            error=str(e),
+        )
+
+
+def check_filesystem_target_health(target: FilesystemTarget) -> HealthCheckResult:
+    """Check if a filesystem target is accessible."""
+    start_time = time.time()
+    dest_path = Path(target.path).expanduser().resolve()
+
+    # Check if path exists or parent exists (for new syncs)
+    if dest_path.exists():
+        latency = (time.time() - start_time) * 1000
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.REACHABLE,
+            url=str(dest_path),
+            latency_ms=round(latency, 2),
+        )
+    elif dest_path.parent.exists():
+        latency = (time.time() - start_time) * 1000
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.REACHABLE,
+            url=str(dest_path),
+            latency_ms=round(latency, 2),
+            error="Target doesn't exist but parent directory is accessible",
+        )
+    else:
+        return HealthCheckResult(
+            remote=target.name,
+            status=RemoteStatus.UNREACHABLE,
+            url=str(dest_path),
+            error=f"Path not accessible: {dest_path}",
+        )
+
+
+def sync_to_targets(
+    config: SyncConfig,
+    targets: list[str] | None = None,
+) -> list[SyncTargetResult]:
+    """Sync to all configured sync targets (filesystem and rsync)."""
+    results: list[SyncTargetResult] = []
+
+    if not config.sync_targets:
+        logger.info("No sync targets configured")
+        return results
+
+    # Filter targets if specified
+    target_names = targets or list(config.sync_targets.keys())
+
+    for name in target_names:
+        target = config.sync_targets.get(name)
+        if target is None:
+            logger.warning(f"Sync target '{name}' not found")
+            continue
+
+        if isinstance(target, FilesystemTarget):
+            result = sync_to_filesystem(target, dry_run=config.dry_run)
+        elif isinstance(target, RsyncTarget):
+            result = sync_to_rsync(target, dry_run=config.dry_run)
+        else:
+            logger.warning(f"Unknown target type for '{name}'")
+            continue
+
+        results.append(result)
+
+    return results
+
+
+def print_sync_target_results(results: list[SyncTargetResult], dry_run: bool = False) -> None:
+    """Print sync target results in a nice format."""
+    if dry_run:
+        logger.header("[DRY RUN] Sync Target Results")
+    else:
+        logger.header("Sync Target Results")
+
+    for result in results:
+        if result.success:
+            icon = "✓"
+            color = Colors.GREEN
+        else:
+            icon = "✗"
+            color = Colors.RED
+
+        type_label = "📁" if result.target_type == SyncTargetType.FILESYSTEM else "🔄"
+
+        print(f"  {color}{icon}{Colors.RESET} {type_label} {Colors.BOLD}{result.name}{Colors.RESET}")
+        print(f"    {result.message}")
+        if result.duration > 0:
+            print(f"    {Colors.DIM}Duration: {result.duration:.2f}s{Colors.RESET}")
+        if result.files_transferred > 0:
+            print(f"    {Colors.DIM}Files: {result.files_transferred}{Colors.RESET}")
+        if result.bytes_transferred > 0:
+            size_mb = result.bytes_transferred / (1024 * 1024)
+            print(f"    {Colors.DIM}Size: {size_mb:.2f} MB{Colors.RESET}")
+        print()
+
+    # Summary
+    success_count = sum(1 for r in results if r.success)
+    failed_count = sum(1 for r in results if not r.success)
+    print(f"  {Colors.BOLD}Summary:{Colors.RESET} ", end="")
+    print(f"{Colors.GREEN}{success_count} succeeded{Colors.RESET}, ", end="")
+    print(f"{Colors.RED}{failed_count} failed{Colors.RESET}")
+
+
 def check_remote_health(
     remote: str,
     timeout: int = 5,
@@ -1551,12 +2106,18 @@ Examples:
   remote-sync --health-check         Check connectivity to all remotes
   remote-sync --process-queue        Retry failed pushes from queue
   remote-sync --push --dry-run       Preview what would be pushed
+  remote-sync --sync-targets         Sync to filesystem/rsync targets
+  remote-sync --sync-targets --target backup-nas  Sync to specific target
 
 Configuration file (.remotesyncrc.json):
   {
     "remotes": {
       "origin": {"priority": 1, "branches": ["*"], "force_push": "block"},
       "mirror": {"priority": 2, "branches": ["main"], "force_push": "warn"}
+    },
+    "sync_targets": {
+      "backup-drive": {"path": "/Volumes/Backup/repos/myproject"},
+      "nas-server": {"host": "nas.local", "path": "/share/repos/myproject", "user": "admin"}
     },
     "parallel": true,
     "offline_queue": true
@@ -1584,7 +2145,7 @@ Configuration file (.remotesyncrc.json):
     action_group.add_argument(
         "--health-check",
         action="store_true",
-        help="Check connectivity to all remotes",
+        help="Check connectivity to all remotes and sync targets",
     )
     action_group.add_argument(
         "--process-queue",
@@ -1601,6 +2162,16 @@ Configuration file (.remotesyncrc.json):
         action="store_true",
         help="Show offline queue contents",
     )
+    action_group.add_argument(
+        "--sync-targets",
+        action="store_true",
+        help="Sync to configured filesystem/rsync targets",
+    )
+    action_group.add_argument(
+        "--sync-all",
+        action="store_true",
+        help="Push to remotes AND sync to targets",
+    )
 
     # Options
     parser.add_argument(
@@ -1614,6 +2185,12 @@ Configuration file (.remotesyncrc.json):
         type=str,
         metavar="NAME",
         help="Target specific remote(s), comma-separated",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        metavar="NAME",
+        help="Target specific sync target(s), comma-separated",
     )
     parser.add_argument(
         "--branch",
@@ -1699,6 +2276,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.health_check:
         results = check_all_remotes_health(config)
         print_health_check_results(results)
+        
+        # Also check sync targets if configured
+        if config.sync_targets:
+            logger.info("\n📁 Sync Target Health:")
+            for target in config.sync_targets:
+                if target.type == SyncTargetType.FILESYSTEM:
+                    healthy = check_filesystem_target_health(target)
+                    status = "✅" if healthy else "❌"
+                    logger.info(f"  {status} {target.name} → {target.path}")
+                elif target.type == SyncTargetType.RSYNC:
+                    healthy = check_rsync_target_health(target)
+                    status = "✅" if healthy else "❌"
+                    logger.info(f"  {status} {target.name} → {target.host}:{target.path}")
+        
         # Return error if any remote is unreachable
         unreachable = [r for r in results if r.status == RemoteStatus.UNREACHABLE]
         return 1 if unreachable else 0
@@ -1738,6 +2329,20 @@ def main(argv: list[str] | None = None) -> int:
         queue = load_queue()
         print_queue_status(queue)
         return 0
+
+    elif args.sync_targets or args.sync_all:
+        # Parse target names
+        target_names = None
+        if args.target:
+            target_names = [t.strip() for t in args.target.split(",")]
+        
+        # Sync to configured sync targets (filesystem/rsync)
+        results = sync_to_targets(config, target_names)
+        print_sync_target_results(results, dry_run=config.dry_run)
+        
+        # Return error if any sync failed
+        failed = [r for r in results if not r.success]
+        return 1 if failed else 0
 
     else:
         # Default: show status

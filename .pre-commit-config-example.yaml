@@ -1,0 +1,44 @@
+# Example .pre-commit-config.yaml for using pre-commit-tidy hooks
+#
+# To use these hooks in your project:
+# 1. Copy this file to .pre-commit-config.yaml
+# 2. Update the 'rev' to the latest version (see: https://github.com/codefuturist/pre-commit-tidy/releases)
+# 3. Enable/disable hooks as needed
+# 4. Run: pre-commit install
+
+repos:
+  - repo: https://github.com/codefuturist/pre-commit-tidy
+    rev: v1.2.0  # Use the latest version from releases
+    hooks:
+      # Organize files based on rules in .tidyrc.yaml
+      - id: tidy
+        args: ['--preset', 'python']  # Optional: use preset
+        # Or configure with .tidyrc.yaml in your repo root
+
+      # Track locally-built binaries for staleness
+      - id: binary-track
+        # Configure with .binariesrc.json in your repo root
+
+      # Keep multiple git remotes in sync
+      - id: remote-sync
+        # Configure with .remotesyncrc.yaml in your repo root
+
+      # AI-powered automatic linting error fixes
+      - id: ai-fix
+        args: ['--check']  # Use --fix to auto-fix
+        # Configure with .aifixrc.yaml in your repo root
+
+# Common pre-commit hooks for Python projects
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]

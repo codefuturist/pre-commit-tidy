@@ -4,3 +4,35 @@
     entry: pre-commit validate-manifest
     language: python
     files: ^\.pre-commit-hooks\.yaml$
+
+-   id: tidy
+    name: tidy - automated file organization
+    description: Organize files based on configurable rules
+    entry: tidy
+    language: python
+    pass_filenames: false
+    always_run: true
+
+-   id: binary-track
+    name: binary-track - track binary staleness
+    description: Track locally-built binaries and detect staleness
+    entry: binary-track
+    language: python
+    pass_filenames: false
+    always_run: true
+
+-   id: remote-sync
+    name: remote-sync - sync git remotes
+    description: Keep multiple git remotes in sync
+    entry: remote-sync
+    language: python
+    pass_filenames: false
+    always_run: true
+
+-   id: ai-fix
+    name: ai-fix - AI-powered linter fixer
+    description: Use AI to automatically fix linting errors
+    entry: ai-fix
+    language: python
+    pass_filenames: false
+    always_run: true

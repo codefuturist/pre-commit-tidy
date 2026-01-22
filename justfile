@@ -2,7 +2,7 @@
 
 # Smart commit: groups files logically and uses conventional commits
 commit-ai:
-    copilot --all-tools --dangerously-skip-permissions --model claude-4-5-haiku -p "\
+    copilot --allow-all --model claude-sonnet-4.5 -p "\
     You are a git expert following git flow and Conventional Commits (conventionalcommits.org). \
     \
     TASK: Analyze staged files and create clean, atomic commits. \

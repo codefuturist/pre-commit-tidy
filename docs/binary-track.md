@@ -20,11 +20,12 @@ binary-track --binary=mytool --language=go --init
 ## CLI Options
 
 ```
-Usage: binary-track [options]
+Usage: binary-track [options] [files...]
 
 Actions:
   --status                Show status of all tracked binaries
   --check                 Check for stale binaries (exit 1 if any stale)
+  --check-staged          Check if staged files affect any binary (for pre-commit)
   --rebuild               Rebuild all stale binaries
   --rebuild-all           Rebuild all tracked binaries
   --watch                 Watch source files and rebuild on change
@@ -55,6 +56,9 @@ Options:
   --quiet                 Suppress all output except errors
   --json                  Output in JSON format
   --version               Show version number
+
+Positional Arguments:
+  files                   Files to check (passed by pre-commit with --check-staged)
 ```
 
 ## Language Presets
@@ -187,54 +191,100 @@ Binary-track uses platform-specific conventions for binary installation:
 
 ## Pre-commit Integration
 
-Binary-track can be integrated with pre-commit to automatically check for stale binaries before commits. This ensures developers don't commit source code changes without rebuilding affected binaries.
+Binary-track integrates with pre-commit to automatically check if staged files affect any tracked binaries. This ensures developers are notified when source code changes require a binary rebuild.
 
-### Option 1: Inline Configuration (Recommended for Simple Setups)
+### How It Works
+
+Pre-commit passes staged files to binary-track, which then:
+1. Checks if any file matches a binary's source patterns
+2. Reports which binaries are affected
+3. Exits based on the configured policy (warn, block, or ignore)
+
+This is **simpler and faster** than tracking git commits or file hashes — just pattern matching on staged files.
+
+### Option 1: Inline Configuration (Recommended)
 
 Configure everything directly in `.pre-commit-config.yaml` — no separate config file needed:
 
 ```yaml
 repos:
-  - repo: https://github.com/codefuturist/pre-commit-tidy
-    rev: v2.0.0
+  - repo: local
     hooks:
       - id: binary-track
-        args:
-          - --binary=mytool
-          - --language=go
-          - --policy=warn
-          - --check
+        name: Check if binaries need rebuild
+        entry: binary-track --check-staged --binary=mytool --language=rust
+        language: system
+        # pass_filenames: true (default)
 ```
+
+When you stage `src/main.rs` and commit:
+- Pre-commit runs: `binary-track --check-staged --binary=mytool --language=rust src/main.rs`
+- Binary-track checks: Does `src/main.rs` match `**/*.rs`? → Yes → warns about rebuild
 
 #### Multiple Binaries Inline
 
 ```yaml
 repos:
-  - repo: https://github.com/codefuturist/pre-commit-tidy
-    rev: v2.0.0
+  - repo: local
     hooks:
       - id: binary-track
-        args:
-          - --binary=frontend-cli
-          - --language=node
-          - --binary=backend-api
-          - --language=go
-          - --policy=block
-          - --check
+        name: Check if binaries need rebuild
+        entry: binary-track --check-staged --binary=frontend --language=node --binary=backend --language=go
+        language: system
 ```
 
-### Option 2: Config File (Recommended for Advanced Setups)
+#### Monorepo Support
+
+For monorepos with multiple projects in subdirectories, use `--project-dir` to scope each binary to its project:
+
+```yaml
+# Single .pre-commit-config.yaml at monorepo root
+repos:
+  - repo: local
+    hooks:
+      - id: binary-track
+        name: Check if binaries need rebuild
+        entry: >-
+          binary-track --check-staged
+          --binary=api --language=go --project-dir=services/api
+          --binary=cli --language=rust --project-dir=tools/cli
+          --binary=web --language=node --project-dir=packages/web
+        language: system
+```
+
+How it works:
+- Changes to `services/api/main.go` → only triggers rebuild warning for `api`
+- Changes to `tools/cli/src/main.rs` → only triggers rebuild warning for `cli`
+- Changes to `packages/web/index.ts` → only triggers rebuild warning for `web`
+- Changes to `README.md` (at root) → no warnings (not in any project-dir)
+
+Each `--project-dir` applies to the preceding `--binary`. Files outside a binary's project directory are ignored for that binary.
+
+#### With Block Policy (Prevent Commits)
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: binary-track
+        name: Check if binaries need rebuild
+        entry: binary-track --check-staged --binary=mytool --language=rust --policy=block
+        language: system
+```
+
+### Option 2: Config File (For Advanced Setups)
 
 For complex configurations with codesigning, services, or many binaries:
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/codefuturist/pre-commit-tidy
-    rev: v2.0.0
+  - repo: local
     hooks:
       - id: binary-track
-        args: [--check]
+        name: Check if binaries need rebuild
+        entry: binary-track --check-staged
+        language: system
 ```
 
 ```yaml
@@ -249,6 +299,8 @@ binaries:
       enabled: true
       type: launchd
       name: com.example.mytool
+
+pre_commit_policy: warn
 ```
 
 ### Migrating from Inline to Config File
@@ -263,11 +315,11 @@ This creates `.binariesrc.yaml` and you can simplify your pre-commit config.
 
 ### Pre-commit Policy Options
 
-Configure how binary-track behaves during pre-commit checks:
+Configure how binary-track behaves when staged files affect binaries:
 
 ```yaml
 # Via inline arg:
-args: [--policy=warn, --check]
+--policy=warn
 
 # Or in .binariesrc.yaml:
 pre_commit_policy: "warn"

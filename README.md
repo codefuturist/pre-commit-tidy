@@ -11,7 +11,7 @@ Developer workflow tools for pre-commit hooks.
 ## Install
 
 ```bash
-pip install pre-commit-tidy
+pipx install pre-commit-tidy
 ```
 
 ## Quick Start

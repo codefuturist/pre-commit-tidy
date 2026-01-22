@@ -252,3 +252,4 @@ $RECYCLE.BIN/
 
 .tidy-undo/
 .ai-fix-cache/
+.binary-track-manifest.json

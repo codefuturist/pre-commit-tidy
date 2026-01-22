@@ -107,3 +107,4 @@ logger.error("Failed")                 # ✗ red
 - Use `monkeypatch.setenv()` for environment variable tests
 - Mock git commands when testing `binary_track` or `remote_sync`
 - Check `tests/test_tidy.py` for comprehensive examples of testing config loading and file operations
+---

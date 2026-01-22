@@ -16,60 +16,181 @@ import yaml
 from pre_commit.binary_track import (
     BinaryConfig,
     BinaryStatus,
-    BinaryStatusResult,
-    BinaryType,
-    BuildFailureReason,
-    BuildManifest,
-    BuildRecord,
     CodesignConfig,
     CodesignResult,
     CodesignStatus,
     ConfigDict,
-    InstallLocation,
-    InstallScope,
-    Platform,
+    HealthResult,
+    LanguagePreset,
+    Logger,
     PreCommitPolicy,
-    RebuildStatus,
-    ServiceConfig,
-    ServiceResult,
-    ServiceStatus,
-    ServiceType,
+    RebuildResult,
+    StagedCheckResult,
     TrackConfig,
-    TrackingMethod,
-    categorize_build_failure,
+    build_config_from_args,
     check_binary_health,
+    check_staged_files,
     codesign_binary,
-    compute_file_hash,
-    ensure_binary_executable,
-    ensure_install_path_exists,
-    expand_patterns,
-    generate_config_file,
-    get_current_commit,
-    get_current_platform,
-    get_default_install_locations,
+    derive_binary_name,
+    detect_project_language,
+    file_matches_pattern,
     get_language_preset,
-    get_path_setup_instructions,
-    get_recommended_install_path,
-    get_service_status,
-    get_source_fingerprint,
-    is_binary_stale,
     is_codesign_available,
-    is_path_in_system_path,
     list_language_presets,
     load_config_file,
-    load_env_config,
-    load_manifest,
-    load_pre_commit_config,
-    save_manifest,
-    start_service,
-    stop_service,
+    main,
+    merge_configs,
+    parse_args,
+    rebuild_all,
+    rebuild_binary,
     verify_signature,
-    _build_inline_config,
-    _parse_precommit_args_to_config,
+    LANGUAGE_PRESETS,
 )
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
+
+
+# =============================================================================
+# Language Presets Tests
+# =============================================================================
+
+
+class TestLanguagePresets:
+    """Tests for language presets."""
+
+    def test_get_preset_exists(self) -> None:
+        """Test getting an existing preset."""
+        preset = get_language_preset("rust")
+        assert preset is not None
+        assert preset.name == "rust"
+        assert "**/*.rs" in preset.source_patterns
+        assert "Cargo.toml" in preset.source_patterns
+
+    def test_get_preset_not_exists(self) -> None:
+        """Test getting a non-existent preset."""
+        preset = get_language_preset("not-a-language")
+        assert preset is None
+
+    def test_get_preset_case_insensitive(self) -> None:
+        """Test preset lookup is case insensitive."""
+        preset1 = get_language_preset("RUST")
+        preset2 = get_language_preset("Rust")
+        preset3 = get_language_preset("rust")
+        assert preset1 == preset2 == preset3
+
+    def test_list_presets(self) -> None:
+        """Test listing available presets."""
+        presets = list_language_presets()
+        assert len(presets) >= 10
+        names = [name for name, _ in presets]
+        assert "go" in names
+        assert "rust" in names
+        assert "python" in names
+        assert "swift" in names
+
+    def test_all_presets_have_required_fields(self) -> None:
+        """Test all presets have required fields."""
+        for name, preset in LANGUAGE_PRESETS.items():
+            assert preset.name == name
+            assert len(preset.source_patterns) > 0
+            assert preset.default_build_cmd
+            assert preset.default_install_path_template
+            assert len(preset.file_extensions) > 0
+            assert preset.description
+
+    def test_preset_get_build_cmd(self) -> None:
+        """Test getting build command from preset."""
+        preset = get_language_preset("rust")
+        assert preset is not None
+        cmd = preset.get_build_cmd("mytool")
+        assert "mytool" in cmd
+        assert "cargo" in cmd.lower()
+
+    def test_preset_get_install_path(self) -> None:
+        """Test getting install path from preset."""
+        preset = get_language_preset("go")
+        assert preset is not None
+        path = preset.get_install_path("mytool")
+        assert "mytool" in path
+        assert "~" in path or "/" in path
+
+
+# =============================================================================
+# Project Detection Tests
+# =============================================================================
+
+
+class TestProjectDetection:
+    """Tests for smart project detection."""
+
+    def test_detect_rust_project(self, tmp_path: Path) -> None:
+        """Test detecting Rust project."""
+        (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+        language = detect_project_language(tmp_path)
+        assert language == "rust"
+
+    def test_detect_go_project(self, tmp_path: Path) -> None:
+        """Test detecting Go project."""
+        (tmp_path / "go.mod").write_text("module example.com/test")
+        language = detect_project_language(tmp_path)
+        assert language == "go"
+
+    def test_detect_swift_project(self, tmp_path: Path) -> None:
+        """Test detecting Swift package project."""
+        (tmp_path / "Package.swift").write_text("// swift-tools-version:5.5")
+        language = detect_project_language(tmp_path)
+        assert language == "swift"
+
+    def test_detect_swift_app_project(self, tmp_path: Path) -> None:
+        """Test detecting Swift Xcode project."""
+        (tmp_path / "Package.swift").write_text("// swift-tools-version:5.5")
+        (tmp_path / "MyApp.xcodeproj").mkdir()
+        language = detect_project_language(tmp_path)
+        assert language == "swift-app"
+
+    def test_detect_uv_project(self, tmp_path: Path) -> None:
+        """Test detecting uv project."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'")
+        (tmp_path / "uv.lock").write_text("")
+        language = detect_project_language(tmp_path)
+        assert language == "uv"
+
+    def test_detect_python_project(self, tmp_path: Path) -> None:
+        """Test detecting standard Python project."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'")
+        language = detect_project_language(tmp_path)
+        assert language == "python"
+
+    def test_detect_pnpm_project(self, tmp_path: Path) -> None:
+        """Test detecting pnpm project."""
+        (tmp_path / "package.json").write_text('{"name": "test"}')
+        (tmp_path / "pnpm-lock.yaml").write_text("")
+        language = detect_project_language(tmp_path)
+        assert language == "pnpm"
+
+    def test_detect_node_project(self, tmp_path: Path) -> None:
+        """Test detecting npm project."""
+        (tmp_path / "package.json").write_text('{"name": "test"}')
+        (tmp_path / "package-lock.json").write_text("")
+        language = detect_project_language(tmp_path)
+        assert language == "node"
+
+    def test_detect_unknown_project(self, tmp_path: Path) -> None:
+        """Test detection returns None for unknown project."""
+        language = detect_project_language(tmp_path)
+        assert language is None
+
+    def test_derive_binary_name(self) -> None:
+        """Test deriving binary name from path."""
+        assert derive_binary_name(Path("apps/cli/mytool")) == "mytool"
+        assert derive_binary_name(Path("services/api")) == "api"
+        assert derive_binary_name(Path("my-project")) == "my-project"
+
+
+# =============================================================================
+# BinaryConfig Tests
+# =============================================================================
 
 
 class TestBinaryConfig:
@@ -88,2691 +209,771 @@ class TestBinaryConfig:
         assert config.source_patterns == ["src/**/*.go"]
         assert config.build_cmd == "go build"
         assert config.install_path == "~/.local/bin/mytool"
-        assert config.language == ""
-        assert config.rebuild_on_commit is True
-        assert config.check_in_path is True
-        assert config.timeout == 300
 
-    def test_from_dict_full(self) -> None:
-        """Test creating config with all options."""
+    def test_from_dict_with_language(self) -> None:
+        """Test creating config with language."""
         data = {
-            "source_patterns": ["cmd/**/*.go", "internal/**/*.go"],
-            "build_cmd": "make build",
-            "install_path": "/usr/local/bin/mytool",
-            "language": "go",
-            "rebuild_on_commit": False,
-            "check_in_path": False,
-            "working_dir": "./cmd",
-            "env": {"CGO_ENABLED": "0"},
-            "timeout": 600,
+            "source_patterns": ["**/*.rs"],
+            "build_cmd": "cargo build",
+            "install_path": "~/.local/bin/mytool",
+            "language": "rust",
         }
         config = BinaryConfig.from_dict("mytool", data)
+        assert config.language == "rust"
 
-        assert config.name == "mytool"
-        assert len(config.source_patterns) == 2
-        assert config.language == "go"
-        assert config.rebuild_on_commit is False
-        assert config.check_in_path is False
-        assert config.working_dir == "./cmd"
-        assert config.env == {"CGO_ENABLED": "0"}
-        assert config.timeout == 600
+    def test_from_dict_with_working_dir(self) -> None:
+        """Test creating config with working directory."""
+        data = {
+            "source_patterns": ["**/*.rs"],
+            "build_cmd": "cargo build",
+            "install_path": "~/.local/bin/mytool",
+            "working_dir": "apps/cli/mytool",
+        }
+        config = BinaryConfig.from_dict("mytool", data)
+        assert config.working_dir == "apps/cli/mytool"
 
     def test_get_expanded_install_path(self) -> None:
         """Test expanding ~ in install path."""
         config = BinaryConfig(
-            name="test",
-            install_path="~/.local/bin/test",
+            name="mytool",
+            source_patterns=["**/*.go"],
+            install_path="~/.local/bin/mytool",
         )
         expanded = config.get_expanded_install_path()
-        assert "~" not in str(expanded)
-        assert str(expanded).endswith(".local/bin/test")
+        assert str(expanded).startswith(str(Path.home()))
+        assert "mytool" in str(expanded)
+
+
+# =============================================================================
+# TrackConfig Tests
+# =============================================================================
 
 
 class TestTrackConfig:
     """Tests for the TrackConfig dataclass."""
 
-    def test_from_dict_defaults(self) -> None:
-        """Test creating config with defaults."""
-        config = TrackConfig.from_dict({})
-
+    def test_from_dict_minimal(self, tmp_path: Path) -> None:
+        """Test creating config with minimal data."""
+        data: ConfigDict = {"binaries": {}}
+        config = TrackConfig.from_dict(data, tmp_path)
+        assert config.root_dir == tmp_path
         assert config.binaries == {}
-        assert config.auto_rebuild is False
-        assert config.stale_threshold_hours == 24
-        assert config.watch_debounce_ms == 500
         assert config.pre_commit_policy == PreCommitPolicy.WARN
-        assert config.track_by == TrackingMethod.GIT_COMMIT
-        assert config.parallel_builds is True
-        assert config.max_workers == 4
 
-    def test_from_dict_with_binaries(self) -> None:
+    def test_from_dict_with_binaries(self, tmp_path: Path) -> None:
         """Test creating config with binaries."""
         data: ConfigDict = {
             "binaries": {
-                "tool1": {
-                    "source_patterns": ["src/**/*.rs"],
-                    "build_cmd": "cargo build",
-                    "install_path": "~/.cargo/bin/tool1",
-                    "language": "rust",
-                },
-                "tool2": {
-                    "source_patterns": ["*.py"],
-                    "build_cmd": "pip install -e .",
-                    "install_path": "~/.local/bin/tool2",
-                    "language": "python",
-                },
-            },
-            "auto_rebuild": True,
-            "pre_commit_policy": "block",
-            "track_by": "hash",
-        }
-        config = TrackConfig.from_dict(data)
-
-        assert len(config.binaries) == 2
-        assert "tool1" in config.binaries
-        assert "tool2" in config.binaries
-        assert config.auto_rebuild is True
-        assert config.pre_commit_policy == PreCommitPolicy.BLOCK
-        assert config.track_by == TrackingMethod.HASH
-
-    def test_from_dict_invalid_policy(self) -> None:
-        """Test that invalid policy defaults to WARN."""
-        config = TrackConfig.from_dict({"pre_commit_policy": "invalid"})
-        assert config.pre_commit_policy == PreCommitPolicy.WARN
-
-    def test_from_dict_invalid_track_by(self) -> None:
-        """Test that invalid track_by defaults to GIT_COMMIT."""
-        config = TrackConfig.from_dict({"track_by": "invalid"})
-        assert config.track_by == TrackingMethod.GIT_COMMIT
-
-
-class TestLoadConfigFile:
-    """Tests for the load_config_file function."""
-
-    def test_load_existing_config(self, tmp_path: Path) -> None:
-        """Test loading an existing config file."""
-        config_file = tmp_path / ".binariesrc.yaml"
-        config_data = {
-            "binaries": {
                 "mytool": {
-                    "source_patterns": ["src/**/*.go"],
+                    "source_patterns": ["**/*.go"],
                     "build_cmd": "go build",
                     "install_path": "~/.local/bin/mytool",
-                }
-            },
-            "track_by": "mtime",
-        }
-        with open(config_file, 'w', encoding='utf-8') as f:
-            yaml.dump(config_data, f)
-
-        os.chdir(tmp_path)
-        loaded = load_config_file(root_dir=tmp_path)
-
-        assert "binaries" in loaded
-        assert "mytool" in loaded["binaries"]
-        assert loaded["track_by"] == "mtime"
-
-    def test_load_explicit_config_path(self, tmp_path: Path) -> None:
-        """Test loading config from explicit path."""
-        config_file = tmp_path / "custom-config.yaml"
-        config_data = {"binaries": {"tool": {"build_cmd": "make"}}}
-        with open(config_file, 'w', encoding='utf-8') as f:
-            yaml.dump(config_data, f)
-
-        loaded = load_config_file(Path("custom-config.yaml"), root_dir=tmp_path)
-        assert "tool" in loaded["binaries"]
-
-    def test_load_missing_config(self, tmp_path: Path) -> None:
-        """Test loading when no config exists returns empty dict."""
-        loaded = load_config_file(root_dir=tmp_path)
-        assert loaded == {}
-
-    def test_load_explicit_missing_config_raises(self, tmp_path: Path) -> None:
-        """Test loading explicit missing config raises error."""
-        with pytest.raises(FileNotFoundError):
-            load_config_file(Path("nonexistent.json"), root_dir=tmp_path)
-
-
-class TestLoadEnvConfig:
-    """Tests for the load_env_config function."""
-
-    def test_load_auto_rebuild(self, monkeypatch: MonkeyPatch) -> None:
-        """Test loading auto_rebuild from env."""
-        monkeypatch.setenv("BINARY_TRACK_AUTO_REBUILD", "true")
-        config = load_env_config()
-        assert config.get("auto_rebuild") is True
-
-    def test_load_policy(self, monkeypatch: MonkeyPatch) -> None:
-        """Test loading policy from env."""
-        monkeypatch.setenv("BINARY_TRACK_POLICY", "block")
-        config = load_env_config()
-        assert config.get("pre_commit_policy") == "block"
-
-    def test_empty_env(self, monkeypatch: MonkeyPatch) -> None:
-        """Test empty config when no env vars set."""
-        monkeypatch.delenv("BINARY_TRACK_AUTO_REBUILD", raising=False)
-        monkeypatch.delenv("BINARY_TRACK_POLICY", raising=False)
-        config = load_env_config()
-        assert config == {}
-
-
-class TestBuildManifest:
-    """Tests for the BuildManifest dataclass."""
-
-    def test_to_dict(self) -> None:
-        """Test serializing manifest to dict."""
-        record = BuildRecord(
-            binary_name="mytool",
-            built_at="2024-01-15T10:00:00Z",
-            source_commit="abc123",
-            build_duration=5.5,
-            success=True,
-        )
-        manifest = BuildManifest(
-            records={"mytool": record},
-            created_at="2024-01-15T09:00:00Z",
-            updated_at="2024-01-15T10:00:00Z",
-        )
-
-        data = manifest.to_dict()
-        assert data["created_at"] == "2024-01-15T09:00:00Z"
-        assert "mytool" in data["records"]
-        assert data["records"]["mytool"]["source_commit"] == "abc123"
-
-    def test_from_dict(self) -> None:
-        """Test deserializing manifest from dict."""
-        data = {
-            "created_at": "2024-01-15T09:00:00Z",
-            "updated_at": "2024-01-15T10:00:00Z",
-            "records": {
-                "mytool": {
-                    "binary_name": "mytool",
-                    "built_at": "2024-01-15T10:00:00Z",
-                    "source_commit": "abc123",
-                    "source_hashes": {},
-                    "source_mtimes": {},
-                    "build_duration": 5.5,
-                    "success": True,
-                    "error": "",
-                }
+                },
             },
         }
-        manifest = BuildManifest.from_dict(data)
+        config = TrackConfig.from_dict(data, tmp_path)
+        assert "mytool" in config.binaries
+        assert config.binaries["mytool"].name == "mytool"
 
-        assert manifest.created_at == "2024-01-15T09:00:00Z"
-        assert "mytool" in manifest.records
-        assert manifest.records["mytool"].source_commit == "abc123"
+    def test_from_dict_with_policy(self, tmp_path: Path) -> None:
+        """Test creating config with pre-commit policy."""
+        data: ConfigDict = {
+            "binaries": {},
+            "pre_commit_policy": "block",
+        }
+        config = TrackConfig.from_dict(data, tmp_path)
+        assert config.pre_commit_policy == PreCommitPolicy.BLOCK
 
-    def test_round_trip(self) -> None:
-        """Test that manifest survives serialization round-trip."""
-        record = BuildRecord(
-            binary_name="tool",
-            built_at="2024-01-15T10:00:00Z",
-            source_hashes={"src/main.go": "abc123"},
+
+# =============================================================================
+# File Pattern Matching Tests
+# =============================================================================
+
+
+class TestFilePatternMatching:
+    """Tests for file pattern matching."""
+
+    def test_simple_pattern(self, tmp_path: Path) -> None:
+        """Test simple file pattern."""
+        assert file_matches_pattern("main.go", "*.go", tmp_path)
+        assert not file_matches_pattern("main.rs", "*.go", tmp_path)
+
+    def test_recursive_pattern(self, tmp_path: Path) -> None:
+        """Test recursive glob pattern."""
+        assert file_matches_pattern("src/main.go", "**/*.go", tmp_path)
+        assert file_matches_pattern("deep/nested/file.go", "**/*.go", tmp_path)
+        assert not file_matches_pattern("src/main.rs", "**/*.go", tmp_path)
+
+    def test_specific_file(self, tmp_path: Path) -> None:
+        """Test matching specific files."""
+        assert file_matches_pattern("Cargo.toml", "Cargo.toml", tmp_path)
+        assert file_matches_pattern("go.mod", "go.mod", tmp_path)
+
+    def test_nested_file(self, tmp_path: Path) -> None:
+        """Test matching nested files with pattern."""
+        assert file_matches_pattern("src/lib.rs", "**/*.rs", tmp_path)
+        assert file_matches_pattern("pkg/util/helper.go", "**/*.go", tmp_path)
+
+
+# =============================================================================
+# Check Staged Files Tests
+# =============================================================================
+
+
+class TestCheckStagedFiles:
+    """Tests for check_staged_files function."""
+
+    def test_no_files(self, tmp_path: Path) -> None:
+        """Test with no staged files."""
+        config = TrackConfig(
+            root_dir=tmp_path,
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    source_patterns=["**/*.go"],
+                ),
+            },
         )
-        original = BuildManifest(records={"tool": record}, created_at="2024-01-15")
+        logger = Logger()
+        result = check_staged_files(config, logger, [])
+        assert not result.has_affected
+        assert result.total_files_checked == 0
 
-        restored = BuildManifest.from_dict(original.to_dict())
-        assert restored.records["tool"].source_hashes == {"src/main.go": "abc123"}
-
-
-class TestSaveLoadManifest:
-    """Tests for saving and loading manifests."""
-
-    def test_save_and_load(self, tmp_path: Path) -> None:
-        """Test saving and loading a manifest."""
-        record = BuildRecord(
-            binary_name="mytool",
-            built_at="2024-01-15T10:00:00Z",
-            source_commit="abc123",
+    def test_no_matching_files(self, tmp_path: Path) -> None:
+        """Test with files that don't match patterns."""
+        config = TrackConfig(
+            root_dir=tmp_path,
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    source_patterns=["**/*.go"],
+                ),
+            },
         )
-        manifest = BuildManifest(records={"mytool": record})
+        logger = Logger()
+        result = check_staged_files(config, logger, ["README.md", "main.rs"])
+        assert not result.has_affected
 
-        save_manifest(manifest, tmp_path)
-        loaded = load_manifest(tmp_path)
+    def test_matching_files(self, tmp_path: Path) -> None:
+        """Test with files that match patterns."""
+        config = TrackConfig(
+            root_dir=tmp_path,
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    source_patterns=["**/*.go", "go.mod"],
+                ),
+            },
+        )
+        logger = Logger()
+        result = check_staged_files(config, logger, ["main.go", "go.mod"])
+        assert result.has_affected
+        assert "mytool" in result.affected_binaries
+        assert len(result.file_matches["mytool"]) == 2
 
-        assert "mytool" in loaded.records
-        assert loaded.records["mytool"].source_commit == "abc123"
+    def test_multiple_binaries(self, tmp_path: Path) -> None:
+        """Test with multiple binaries."""
+        config = TrackConfig(
+            root_dir=tmp_path,
+            binaries={
+                "gotool": BinaryConfig(
+                    name="gotool",
+                    source_patterns=["**/*.go"],
+                ),
+                "rusttool": BinaryConfig(
+                    name="rusttool",
+                    source_patterns=["**/*.rs"],
+                ),
+            },
+        )
+        logger = Logger()
+        result = check_staged_files(config, logger, ["main.go", "lib.rs"])
+        assert result.has_affected
+        assert "gotool" in result.affected_binaries
+        assert "rusttool" in result.affected_binaries
 
-    def test_load_missing_manifest(self, tmp_path: Path) -> None:
-        """Test loading when no manifest exists."""
-        manifest = load_manifest(tmp_path)
-        assert manifest.records == {}
+    def test_working_dir_scoping(self, tmp_path: Path) -> None:
+        """Test that working_dir scopes pattern matching."""
+        config = TrackConfig(
+            root_dir=tmp_path,
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    source_patterns=["**/*.rs"],
+                    working_dir="apps/cli/mytool",
+                ),
+            },
+        )
+        logger = Logger()
 
-    def test_load_invalid_manifest(self, tmp_path: Path) -> None:
-        """Test loading invalid YAML manifest."""
-        manifest_path = tmp_path / ".binary-track-manifest.json"
-        manifest_path.write_text("invalid: yaml: {{{")
+        # File in the working dir should match
+        result1 = check_staged_files(config, logger, ["apps/cli/mytool/src/main.rs"])
+        assert result1.has_affected
 
-        manifest = load_manifest(tmp_path)
-        assert manifest.records == {}
-
-
-class TestExpandPatterns:
-    """Tests for the expand_patterns function."""
-
-    def test_simple_glob(self, tmp_path: Path) -> None:
-        """Test expanding simple glob pattern."""
-        (tmp_path / "file1.go").touch()
-        (tmp_path / "file2.go").touch()
-        (tmp_path / "file.py").touch()
-
-        files = expand_patterns(tmp_path, ["*.go"])
-        assert len(files) == 2
-        assert all(f.suffix == ".go" for f in files)
-
-    def test_recursive_glob(self, tmp_path: Path) -> None:
-        """Test expanding recursive glob pattern."""
-        src = tmp_path / "src"
-        src.mkdir()
-        (src / "main.go").touch()
-        pkg = src / "pkg"
-        pkg.mkdir()
-        (pkg / "util.go").touch()
-
-        files = expand_patterns(tmp_path, ["src/**/*.go"])
-        assert len(files) == 2
-
-    def test_multiple_patterns(self, tmp_path: Path) -> None:
-        """Test expanding multiple patterns."""
-        (tmp_path / "main.go").touch()
-        (tmp_path / "go.mod").touch()
-        (tmp_path / "readme.md").touch()
-
-        files = expand_patterns(tmp_path, ["*.go", "go.mod"])
-        names = [f.name for f in files]
-        assert "main.go" in names
-        assert "go.mod" in names
-        assert "readme.md" not in names
-
-    def test_no_matches(self, tmp_path: Path) -> None:
-        """Test pattern with no matches."""
-        files = expand_patterns(tmp_path, ["*.rs"])
-        assert files == []
-
-
-class TestComputeFileHash:
-    """Tests for the compute_file_hash function."""
-
-    def test_compute_hash(self, tmp_path: Path) -> None:
-        """Test computing file hash."""
-        file = tmp_path / "test.txt"
-        file.write_text("hello world")
-
-        hash1 = compute_file_hash(file)
-        assert len(hash1) == 64  # SHA-256 hex length
-
-    def test_same_content_same_hash(self, tmp_path: Path) -> None:
-        """Test that same content produces same hash."""
-        file1 = tmp_path / "file1.txt"
-        file2 = tmp_path / "file2.txt"
-        content = "identical content"
-        file1.write_text(content)
-        file2.write_text(content)
-
-        assert compute_file_hash(file1) == compute_file_hash(file2)
-
-    def test_different_content_different_hash(self, tmp_path: Path) -> None:
-        """Test that different content produces different hash."""
-        file1 = tmp_path / "file1.txt"
-        file2 = tmp_path / "file2.txt"
-        file1.write_text("content a")
-        file2.write_text("content b")
-
-        assert compute_file_hash(file1) != compute_file_hash(file2)
-
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        """Test that missing file returns empty string."""
-        result = compute_file_hash(tmp_path / "nonexistent.txt")
-        assert result == ""
+        # File outside working dir should not match
+        result2 = check_staged_files(config, logger, ["other/main.rs"])
+        assert not result2.has_affected
 
 
-class TestCheckBinaryHealth:
-    """Tests for the check_binary_health function."""
+# =============================================================================
+# Health Check Tests
+# =============================================================================
+
+
+class TestHealthCheck:
+    """Tests for health check functionality."""
 
     def test_missing_binary(self, tmp_path: Path) -> None:
-        """Test checking a missing binary."""
+        """Test health check for missing binary."""
         config = BinaryConfig(
             name="mytool",
+            source_patterns=["**/*.go"],
             install_path=str(tmp_path / "nonexistent"),
         )
-        result = check_binary_health(config)
-
+        logger = Logger()
+        result = check_binary_health(config, logger)
+        assert not result.is_healthy()
         assert result.status == BinaryStatus.MISSING
-        assert result.exists is False
-        assert "not found" in result.message.lower()
 
-    def test_existing_executable(self, tmp_path: Path) -> None:
-        """Test checking an existing executable binary."""
-        binary = tmp_path / "mytool"
-        binary.write_text("#!/bin/sh\necho hello")
-        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    def test_existing_but_not_executable(self, tmp_path: Path) -> None:
+        """Test health check for non-executable file."""
+        binary_path = tmp_path / "mytool"
+        binary_path.write_text("#!/bin/sh\necho hello")
 
         config = BinaryConfig(
             name="mytool",
-            install_path=str(binary),
-            check_in_path=False,
+            source_patterns=["**/*.go"],
+            install_path=str(binary_path),
         )
-        result = check_binary_health(config)
-
-        assert result.exists is True
-        assert result.executable is True
-        assert result.status == BinaryStatus.CURRENT
-
-    def test_not_executable(self, tmp_path: Path) -> None:
-        """Test checking a file that's not executable."""
-        binary = tmp_path / "mytool"
-        binary.write_text("not executable")
-        # Explicitly remove execute permission
-        binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-        config = BinaryConfig(
-            name="mytool",
-            install_path=str(binary),
-        )
-        result = check_binary_health(config)
-
-        assert result.exists is True
-        assert result.executable is False
+        logger = Logger()
+        result = check_binary_health(config, logger)
+        assert not result.is_healthy()
         assert result.status == BinaryStatus.NOT_EXECUTABLE
 
-
-class TestIsBinaryStale:
-    """Tests for the is_binary_stale function."""
-
-    def test_no_build_record(self, tmp_path: Path) -> None:
-        """Test binary is stale if never built."""
-        config = BinaryConfig(
-            name="mytool",
-            source_patterns=["*.go"],
-        )
-
-        is_stale, reason, files = is_binary_stale(
-            config, None, tmp_path, TrackingMethod.GIT_COMMIT
-        )
-
-        assert is_stale is True
-        assert "never built" in reason
-
-    def test_stale_by_hash(self, tmp_path: Path) -> None:
-        """Test detecting staleness by hash changes."""
-        src = tmp_path / "main.go"
-        src.write_text("package main")
+    def test_healthy_binary(self, tmp_path: Path) -> None:
+        """Test health check for healthy binary."""
+        binary_path = tmp_path / "mytool"
+        binary_path.write_text("#!/bin/sh\necho hello")
+        binary_path.chmod(0o755)
 
         config = BinaryConfig(
             name="mytool",
-            source_patterns=["*.go"],
+            source_patterns=["**/*.go"],
+            install_path=str(binary_path),
         )
+        logger = Logger()
+        result = check_binary_health(config, logger)
+        assert result.is_healthy()
+        assert result.status == BinaryStatus.UP_TO_DATE
 
-        # Old build record with different hash
-        old_record = BuildRecord(
-            binary_name="mytool",
-            built_at="2024-01-01",
-            source_hashes={"main.go": "oldhash123"},
+    def test_no_install_path(self) -> None:
+        """Test health check with no install path configured."""
+        config = BinaryConfig(
+            name="mytool",
+            source_patterns=["**/*.go"],
+            install_path="",
         )
+        logger = Logger()
+        result = check_binary_health(config, logger)
+        assert result.status == BinaryStatus.UNKNOWN
 
-        is_stale, reason, files = is_binary_stale(
-            config, old_record, tmp_path, TrackingMethod.HASH
+
+# =============================================================================
+# Rebuild Tests
+# =============================================================================
+
+
+class TestRebuild:
+    """Tests for rebuild functionality."""
+
+    def test_rebuild_dry_run(self, tmp_path: Path) -> None:
+        """Test rebuild in dry-run mode."""
+        config = BinaryConfig(
+            name="mytool",
+            source_patterns=["**/*.go"],
+            build_cmd="go build -o ~/.local/bin/mytool",
         )
+        logger = Logger()
+        result = rebuild_binary(config, tmp_path, logger, dry_run=True)
+        assert result.success
+        assert "Dry run" in result.message
 
-        assert is_stale is True
-        assert "changed" in reason
-        assert "main.go" in files
+    def test_rebuild_no_build_cmd(self, tmp_path: Path) -> None:
+        """Test rebuild with no build command."""
+        config = BinaryConfig(
+            name="mytool",
+            source_patterns=["**/*.go"],
+            build_cmd="",
+        )
+        logger = Logger()
+        result = rebuild_binary(config, tmp_path, logger)
+        assert not result.success
+        assert "No build command" in result.message
 
-    def test_current_by_hash(self, tmp_path: Path) -> None:
-        """Test detecting current binary by matching hash."""
-        src = tmp_path / "main.go"
-        src.write_text("package main")
-        current_hash = compute_file_hash(src)
+    @patch("subprocess.run")
+    def test_rebuild_success(self, mock_run: MagicMock, tmp_path: Path) -> None:
+        """Test successful rebuild."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         config = BinaryConfig(
             name="mytool",
-            source_patterns=["*.go"],
+            source_patterns=["**/*.go"],
+            build_cmd="go build -o ~/.local/bin/mytool",
         )
+        logger = Logger()
+        result = rebuild_binary(config, tmp_path, logger)
+        assert result.success
 
-        record = BuildRecord(
-            binary_name="mytool",
-            built_at="2024-01-01",
-            source_hashes={"main.go": current_hash},
-        )
+    @patch("subprocess.run")
+    def test_rebuild_failure(self, mock_run: MagicMock, tmp_path: Path) -> None:
+        """Test failed rebuild."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="build error")
 
-        is_stale, reason, files = is_binary_stale(
-            config, record, tmp_path, TrackingMethod.HASH
-        )
-
-        assert is_stale is False
-        assert "up to date" in reason
-
-
-class TestGetSourceFingerprint:
-    """Tests for the get_source_fingerprint function."""
-
-    def test_hash_method(self, tmp_path: Path) -> None:
-        """Test fingerprinting by hash."""
-        (tmp_path / "main.go").write_text("package main")
-        (tmp_path / "util.go").write_text("package util")
-
-        commit, hashes, mtimes = get_source_fingerprint(
-            tmp_path, ["*.go"], TrackingMethod.HASH
-        )
-
-        assert commit == ""
-        assert len(hashes) == 2
-        assert "main.go" in hashes
-        assert mtimes == {}
-
-    def test_mtime_method(self, tmp_path: Path) -> None:
-        """Test fingerprinting by mtime."""
-        (tmp_path / "main.go").write_text("package main")
-
-        commit, hashes, mtimes = get_source_fingerprint(
-            tmp_path, ["*.go"], TrackingMethod.MTIME
-        )
-
-        assert commit == ""
-        assert hashes == {}
-        assert "main.go" in mtimes
-        assert mtimes["main.go"] > 0
-
-
-class TestTrackResult:
-    """Tests for the TrackResult dataclass."""
-
-    def test_to_dict(self) -> None:
-        """Test serializing TrackResult to dict."""
-        status = BinaryStatusResult(
+        config = BinaryConfig(
             name="mytool",
-            status=BinaryStatus.STALE,
-            install_path="/usr/local/bin/mytool",
-            exists=True,
-            executable=True,
-            commits_behind=3,
+            source_patterns=["**/*.go"],
+            build_cmd="go build",
         )
-        from pre_commit.binary_track import RebuildResult, TrackResult
-
-        result = TrackResult(
-            statuses=[status],
-            stale_count=1,
-            all_current=False,
-        )
-
-        data = result.to_dict()
-        assert data["stale_count"] == 1
-        assert data["all_current"] is False
-        assert len(data["statuses"]) == 1
-        assert data["statuses"][0]["name"] == "mytool"
-        assert data["statuses"][0]["status"] == "stale"
+        logger = Logger()
+        result = rebuild_binary(config, tmp_path, logger)
+        assert not result.success
 
 
-class TestIntegration:
-    """Integration tests for binary tracking."""
-
-    def test_full_workflow(self, tmp_path: Path) -> None:
-        """Test a complete workflow: configure, check, and verify status."""
-        # Create source files
-        src = tmp_path / "src"
-        src.mkdir()
-        (src / "main.go").write_text("package main")
-
-        # Create config
-        config_data = {
-            "binaries": {
-                "mytool": {
-                    "source_patterns": ["src/**/*.go"],
-                    "build_cmd": "echo 'building'",
-                    "install_path": str(tmp_path / "bin" / "mytool"),
-                    "language": "go",
-                }
-            },
-            "track_by": "hash",
-        }
-        config_file = tmp_path / ".binariesrc.yaml"
-        with open(config_file, 'w', encoding='utf-8') as f:
-            yaml.dump(config_data, f)
-
-        # Load config
-        loaded = load_config_file(root_dir=tmp_path)
-        config = TrackConfig.from_dict(loaded, tmp_path)
-
-        assert "mytool" in config.binaries
-        assert config.track_by == TrackingMethod.HASH
-
-        # Check status (should be missing since binary doesn't exist)
-        binary_config = config.binaries["mytool"]
-        status = check_binary_health(binary_config)
-        assert status.status == BinaryStatus.MISSING
-
-    def test_manifest_persistence(self, tmp_path: Path) -> None:
-        """Test that manifest persists correctly across operations."""
-        # Create initial manifest
-        record = BuildRecord(
-            binary_name="mytool",
-            built_at="2024-01-15T10:00:00Z",
-            source_commit="abc123def456",
-            build_duration=2.5,
-        )
-        manifest = BuildManifest(records={"mytool": record})
-        save_manifest(manifest, tmp_path)
-
-        # Verify file exists
-        manifest_file = tmp_path / ".binary-track-manifest.json"
-        assert manifest_file.exists()
-
-        # Load and verify content
-        loaded = load_manifest(tmp_path)
-        assert "mytool" in loaded.records
-        assert loaded.records["mytool"].source_commit == "abc123def456"
-        assert loaded.records["mytool"].build_duration == 2.5
+# =============================================================================
+# Codesigning Tests
+# =============================================================================
 
 
-class TestPreCommitPolicy:
-    """Tests for pre-commit policy handling."""
+class TestCodesigning:
+    """Tests for codesigning functionality."""
 
-    def test_warn_policy_allows_stale(self) -> None:
-        """Test that warn policy doesn't block on stale."""
-        # This tests the policy enum behavior
-        assert PreCommitPolicy.WARN.value == "warn"
-        assert PreCommitPolicy.BLOCK.value == "block"
-        assert PreCommitPolicy.IGNORE.value == "ignore"
-
-    def test_policy_from_string(self) -> None:
-        """Test creating policy from string."""
-        assert PreCommitPolicy("warn") == PreCommitPolicy.WARN
-        assert PreCommitPolicy("block") == PreCommitPolicy.BLOCK
-        assert PreCommitPolicy("ignore") == PreCommitPolicy.IGNORE
-
-        with pytest.raises(ValueError):
-            PreCommitPolicy("invalid")
-
-
-class TestCodesignConfig:
-    """Tests for the CodesignConfig dataclass."""
-
-    def test_from_dict_empty(self) -> None:
-        """Test creating config with empty/None data."""
-        config = CodesignConfig.from_dict(None)
-        assert config.enabled is False
-        assert config.identity == "-"
-        assert config.entitlements is None
-        assert config.options == []
-        assert config.force is True
-
-    def test_from_dict_full(self) -> None:
-        """Test creating config with all fields."""
-        data = {
-            "enabled": True,
-            "identity": "Developer ID Application: Test",
-            "entitlements": "/path/to/entitlements.plist",
-            "options": ["runtime", "library"],
-            "force": False,
-        }
-        config = CodesignConfig.from_dict(data)
-        assert config.enabled is True
-        assert config.identity == "Developer ID Application: Test"
-        assert config.entitlements == "/path/to/entitlements.plist"
-        assert config.options == ["runtime", "library"]
-        assert config.force is False
-
-    def test_merge_with(self) -> None:
-        """Test merging two codesign configs."""
-        global_config = CodesignConfig(
-            enabled=True,
-            identity="Global Identity",
-            options=["runtime"],
-        )
-        binary_config = CodesignConfig(
-            enabled=False,
-            identity="-",  # Default, should be overridden
-        )
-
-        merged = binary_config.merge_with(global_config)
-        # Global enabled should be used since binary is False
-        assert merged.enabled is True
-        # Global identity should be used since binary is default
-        assert merged.identity == "Global Identity"
-        # Global options should be used since binary has none
-        assert merged.options == ["runtime"]
-
-    def test_merge_with_binary_override(self) -> None:
-        """Test that explicit binary config takes precedence."""
-        global_config = CodesignConfig(
-            enabled=True,
-            identity="Global Identity",
-        )
-        binary_config = CodesignConfig(
-            enabled=True,
-            identity="Binary Specific Identity",
-        )
-
-        merged = binary_config.merge_with(global_config)
-        assert merged.identity == "Binary Specific Identity"
-
-
-class TestBinaryConfigWithCodesign:
-    """Tests for BinaryConfig with codesigning configuration."""
-
-    def test_from_dict_with_codesign(self) -> None:
-        """Test creating BinaryConfig with codesign settings."""
-        data = {
-            "source_patterns": ["src/**/*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-            "codesign": {
-                "enabled": True,
-                "identity": "Developer ID Application: Test",
-            },
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-        assert config.codesign.enabled is True
-        assert config.codesign.identity == "Developer ID Application: Test"
-
-    def test_from_dict_without_codesign(self) -> None:
-        """Test creating BinaryConfig without codesign settings."""
-        data = {
-            "source_patterns": ["src/**/*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-        assert config.codesign.enabled is False
-        assert config.codesign.identity == "-"
-
-
-class TestTrackConfigWithCodesign:
-    """Tests for TrackConfig with global codesigning configuration."""
-
-    def test_global_codesign_merged_with_binary(self) -> None:
-        """Test that global codesign config is merged with binary config."""
-        data: ConfigDict = {
-            "binaries": {
-                "tool1": {
-                    "source_patterns": ["src/**/*.go"],
-                    "build_cmd": "go build",
-                    "install_path": "~/.local/bin/tool1",
-                    # No codesign specified - should inherit global
-                },
-                "tool2": {
-                    "source_patterns": ["src/**/*.rs"],
-                    "build_cmd": "cargo build",
-                    "install_path": "~/.local/bin/tool2",
-                    "codesign": {
-                        "enabled": True,
-                        "identity": "Tool2 Specific",
-                    },
-                },
-            },
-            "codesign": {
-                "enabled": True,
-                "identity": "Global Identity",
-                "options": ["runtime"],
-            },
-        }
-        config = TrackConfig.from_dict(data)
-
-        # tool1 should have global codesign config merged in
-        assert config.binaries["tool1"].codesign.enabled is True
-        assert config.binaries["tool1"].codesign.identity == "Global Identity"
-        assert config.binaries["tool1"].codesign.options == ["runtime"]
-
-        # tool2 should use its own identity but inherit other global settings
-        assert config.binaries["tool2"].codesign.enabled is True
-        assert config.binaries["tool2"].codesign.identity == "Tool2 Specific"
-
-
-class TestLoadEnvConfigWithCodesign:
-    """Tests for environment variable loading with codesigning."""
-
-    def test_load_codesign_enabled(self, monkeypatch: MonkeyPatch) -> None:
-        """Test loading codesign enabled from env."""
-        monkeypatch.setenv("BINARY_TRACK_CODESIGN", "true")
-        config = load_env_config()
-        assert "codesign" in config
-        assert config["codesign"]["enabled"] is True
-
-    def test_load_codesign_identity(self, monkeypatch: MonkeyPatch) -> None:
-        """Test loading codesign identity from env."""
-        monkeypatch.setenv("BINARY_TRACK_CODESIGN_ID", "Test Identity")
-        config = load_env_config()
-        assert "codesign" in config
-        assert config["codesign"]["identity"] == "Test Identity"
-
-    def test_load_codesign_both(self, monkeypatch: MonkeyPatch) -> None:
-        """Test loading both codesign settings from env."""
-        monkeypatch.setenv("BINARY_TRACK_CODESIGN", "true")
-        monkeypatch.setenv("BINARY_TRACK_CODESIGN_ID", "My Identity")
-        config = load_env_config()
-        assert config["codesign"]["enabled"] is True
-        assert config["codesign"]["identity"] == "My Identity"
-
-
-class TestCodesignStatus:
-    """Tests for CodesignStatus enum."""
-
-    def test_status_values(self) -> None:
-        """Test all status enum values exist."""
-        assert CodesignStatus.SIGNED.value == "signed"
-        assert CodesignStatus.VALID.value == "valid"
-        assert CodesignStatus.INVALID.value == "invalid"
-        assert CodesignStatus.UNSIGNED.value == "unsigned"
-        assert CodesignStatus.FAILED.value == "failed"
-        assert CodesignStatus.SKIPPED.value == "skipped"
-        assert CodesignStatus.NOT_SUPPORTED.value == "not_supported"
-
-
-class TestCodesignResult:
-    """Tests for CodesignResult dataclass."""
-
-    def test_basic_result(self) -> None:
-        """Test creating a basic codesign result."""
-        result = CodesignResult(
+    def test_codesign_not_darwin(self, tmp_path: Path) -> None:
+        """Test codesigning on non-macOS platform."""
+        config = BinaryConfig(
             name="mytool",
-            status=CodesignStatus.SIGNED,
-            identity="Developer ID",
-            message="Successfully signed",
+            source_patterns=["**/*.go"],
+            install_path=str(tmp_path / "mytool"),
         )
-        assert result.name == "mytool"
-        assert result.status == CodesignStatus.SIGNED
-        assert result.identity == "Developer ID"
-        assert result.message == "Successfully signed"
+        global_codesign = CodesignConfig(enabled=True)
+        logger = Logger()
 
-
-class TestCodesignBinary:
-    """Tests for the codesign_binary function."""
+        with patch("sys.platform", "linux"):
+            result = codesign_binary(config, global_codesign, logger)
+            assert result.status == CodesignStatus.NOT_APPLICABLE
 
     def test_codesign_not_enabled(self, tmp_path: Path) -> None:
-        """Test that codesigning is skipped when not enabled."""
-        from pre_commit.binary_track import Logger
-
-        binary_config = BinaryConfig(
+        """Test codesigning when not enabled."""
+        config = BinaryConfig(
             name="mytool",
+            source_patterns=["**/*.go"],
             install_path=str(tmp_path / "mytool"),
             codesign=CodesignConfig(enabled=False),
         )
-        track_config = TrackConfig(root_dir=tmp_path)
-        logger = Logger(quiet=True)
+        global_codesign = CodesignConfig(enabled=False)
+        logger = Logger()
 
-        result = codesign_binary(binary_config, track_config, logger)
-        assert result.status == CodesignStatus.SKIPPED
-        assert "not enabled" in result.message
+        result = codesign_binary(config, global_codesign, logger)
+        assert result.status == CodesignStatus.NOT_APPLICABLE
 
-    def test_codesign_binary_not_found(self, tmp_path: Path) -> None:
-        """Test codesigning when binary doesn't exist."""
-        from pre_commit.binary_track import Logger
-
-        binary_config = BinaryConfig(
+    def test_verify_signature_missing_binary(self, tmp_path: Path) -> None:
+        """Test signature verification for missing binary."""
+        config = BinaryConfig(
             name="mytool",
+            source_patterns=["**/*.go"],
             install_path=str(tmp_path / "nonexistent"),
-            codesign=CodesignConfig(enabled=True),
         )
-        track_config = TrackConfig(root_dir=tmp_path)
-        logger = Logger(quiet=True)
+        logger = Logger()
 
-        # Only test if codesign is available
-        if is_codesign_available():
-            result = codesign_binary(binary_config, track_config, logger)
-            assert result.status == CodesignStatus.FAILED
-            assert "not found" in result.message
+        result = verify_signature(config, logger)
+        assert result.status == CodesignStatus.ERROR
 
-    def test_codesign_dry_run(self, tmp_path: Path) -> None:
-        """Test codesigning in dry-run mode."""
-        from pre_commit.binary_track import Logger
 
-        # Create a fake binary
-        binary_path = tmp_path / "mytool"
-        binary_path.write_bytes(b"#!/bin/bash\necho test")
-        binary_path.chmod(0o755)
+# =============================================================================
+# Config Loading Tests
+# =============================================================================
 
-        binary_config = BinaryConfig(
-            name="mytool",
-            install_path=str(binary_path),
-            codesign=CodesignConfig(enabled=True, identity="-"),
+
+class TestConfigLoading:
+    """Tests for configuration loading."""
+
+    def test_load_missing_config(self, tmp_path: Path) -> None:
+        """Test loading non-existent config file."""
+        config = load_config_file(tmp_path / "nonexistent.yaml", tmp_path)
+        assert config == {"binaries": {}}
+
+    def test_load_valid_config(self, tmp_path: Path) -> None:
+        """Test loading valid config file."""
+        config_path = tmp_path / ".binariesrc.yaml"
+        config_path.write_text(
+            """
+binaries:
+  mytool:
+    source_patterns:
+      - "**/*.go"
+    build_cmd: "go build"
+    install_path: "~/.local/bin/mytool"
+"""
         )
-        track_config = TrackConfig(root_dir=tmp_path, dry_run=True)
-        logger = Logger(quiet=True)
-
-        # Only test if codesign is available
-        if is_codesign_available():
-            result = codesign_binary(binary_config, track_config, logger)
-            assert result.status == CodesignStatus.SKIPPED
-            assert "Would run" in result.message
-
-
-class TestVerifySignature:
-    """Tests for the verify_signature function."""
-
-    def test_verify_missing_binary(self, tmp_path: Path) -> None:
-        """Test verifying signature of missing binary."""
-        from pre_commit.binary_track import Logger
-
-        binary_path = tmp_path / "nonexistent"
-
-        # Only test if codesign is available
-        if is_codesign_available():
-            logger = Logger(quiet=True)
-            result = verify_signature(binary_path, logger)
-            assert result.status == CodesignStatus.FAILED
-            assert "not found" in result.message
-
-    def test_verify_unsigned_binary(self, tmp_path: Path) -> None:
-        """Test verifying an unsigned binary."""
-        from pre_commit.binary_track import Logger
-
-        # Create an unsigned binary
-        binary_path = tmp_path / "unsigned_tool"
-        binary_path.write_bytes(b"#!/bin/bash\necho test")
-        binary_path.chmod(0o755)
-
-        # Only test if codesign is available
-        if is_codesign_available():
-            logger = Logger(quiet=True)
-            result = verify_signature(binary_path, logger)
-            # An unsigned script should be reported as unsigned or invalid
-            assert result.status in (CodesignStatus.UNSIGNED, CodesignStatus.INVALID)
-
-
-class TestPlatform:
-    """Tests for platform detection."""
-
-    def test_platform_values(self) -> None:
-        """Test platform enum values exist."""
-        assert Platform.MACOS.value == "macos"
-        assert Platform.LINUX.value == "linux"
-        assert Platform.WINDOWS.value == "windows"
-        assert Platform.UNKNOWN.value == "unknown"
-
-    def test_get_current_platform(self) -> None:
-        """Test getting current platform."""
-        platform = get_current_platform()
-        assert platform in [Platform.MACOS, Platform.LINUX, Platform.WINDOWS, Platform.UNKNOWN]
-
-    def test_binary_type_values(self) -> None:
-        """Test binary type enum values."""
-        assert BinaryType.CLI.value == "cli"
-        assert BinaryType.GUI.value == "gui"
-
-    def test_install_scope_values(self) -> None:
-        """Test install scope enum values."""
-        assert InstallScope.USER.value == "user"
-        assert InstallScope.SYSTEM.value == "system"
-
-
-class TestInstallLocation:
-    """Tests for InstallLocation dataclass."""
-
-    def test_basic_location(self, tmp_path: Path) -> None:
-        """Test creating a basic install location."""
-        loc = InstallLocation(
-            path=tmp_path,
-            scope=InstallScope.USER,
-            binary_type=BinaryType.CLI,
-            platform=Platform.MACOS,
-            description="Test location",
-        )
-        assert loc.path == tmp_path
-        assert loc.scope == InstallScope.USER
-        assert loc.binary_type == BinaryType.CLI
-        assert loc.exists() is True  # tmp_path exists
-
-    def test_exists_nonexistent(self, tmp_path: Path) -> None:
-        """Test exists() returns False for nonexistent path."""
-        loc = InstallLocation(
-            path=tmp_path / "nonexistent",
-            scope=InstallScope.USER,
-            binary_type=BinaryType.CLI,
-            platform=Platform.MACOS,
-        )
-        assert loc.exists() is False
-
-    def test_is_writable(self, tmp_path: Path) -> None:
-        """Test is_writable() for writable path."""
-        loc = InstallLocation(
-            path=tmp_path,
-            scope=InstallScope.USER,
-            binary_type=BinaryType.CLI,
-            platform=Platform.MACOS,
-        )
-        assert loc.is_writable() is True
-
-
-class TestDefaultInstallLocations:
-    """Tests for get_default_install_locations function."""
-
-    def test_get_all_locations(self) -> None:
-        """Test getting all locations without filters."""
-        locations = get_default_install_locations()
-        assert len(locations) > 0
-        assert all(isinstance(loc, InstallLocation) for loc in locations)
-
-    def test_filter_by_binary_type(self) -> None:
-        """Test filtering by binary type."""
-        cli_locations = get_default_install_locations(binary_type=BinaryType.CLI)
-        gui_locations = get_default_install_locations(binary_type=BinaryType.GUI)
-
-        assert all(loc.binary_type == BinaryType.CLI for loc in cli_locations)
-        assert all(loc.binary_type == BinaryType.GUI for loc in gui_locations)
-
-    def test_filter_by_scope(self) -> None:
-        """Test filtering by install scope."""
-        user_locations = get_default_install_locations(scope=InstallScope.USER)
-        system_locations = get_default_install_locations(scope=InstallScope.SYSTEM)
-
-        assert all(loc.scope == InstallScope.USER for loc in user_locations)
-        assert all(loc.scope == InstallScope.SYSTEM for loc in system_locations)
-
-    def test_filter_combined(self) -> None:
-        """Test combining filters."""
-        locations = get_default_install_locations(
-            binary_type=BinaryType.CLI,
-            scope=InstallScope.USER,
-        )
-        assert all(
-            loc.binary_type == BinaryType.CLI and loc.scope == InstallScope.USER
-            for loc in locations
-        )
-
-    def test_macos_locations(self) -> None:
-        """Test macOS-specific locations."""
-        locations = get_default_install_locations(target_platform=Platform.MACOS)
-        paths = [str(loc.path) for loc in locations]
-
-        # Check for expected macOS paths
-        assert any(".local/bin" in p for p in paths)
-        assert any("Applications" in p for p in paths)
-
-    def test_linux_locations(self) -> None:
-        """Test Linux-specific locations."""
-        locations = get_default_install_locations(target_platform=Platform.LINUX)
-        paths = [str(loc.path) for loc in locations]
-
-        # Check for expected Linux paths
-        assert any(".local/bin" in p for p in paths)
-        assert any("/usr/local/bin" in p for p in paths)
-
-    def test_windows_locations(self) -> None:
-        """Test Windows-specific locations."""
-        locations = get_default_install_locations(target_platform=Platform.WINDOWS)
-        paths = [str(loc.path) for loc in locations]
-
-        # Windows locations should exist
-        assert len(locations) > 0
-
-
-class TestRecommendedInstallPath:
-    """Tests for get_recommended_install_path function."""
-
-    def test_default_cli_user(self) -> None:
-        """Test default recommendation for CLI user tools."""
-        path = get_recommended_install_path(BinaryType.CLI, InstallScope.USER)
-        assert ".local/bin" in str(path) or "Programs" in str(path)
-
-    def test_gui_user(self) -> None:
-        """Test recommendation for GUI user apps."""
-        path = get_recommended_install_path(BinaryType.GUI, InstallScope.USER)
-        assert "Applications" in str(path) or "Programs" in str(path) or "opt" in str(path)
-
-
-class TestEnsureInstallPath:
-    """Tests for ensure_install_path_exists function."""
-
-    def test_create_new_directory(self, tmp_path: Path) -> None:
-        """Test creating a new directory."""
-        new_path = tmp_path / "new" / "nested" / "dir"
-        assert not new_path.exists()
-
-        result = ensure_install_path_exists(new_path)
-        assert result is True
-        assert new_path.exists()
-
-    def test_existing_directory(self, tmp_path: Path) -> None:
-        """Test with existing directory."""
-        result = ensure_install_path_exists(tmp_path)
-        assert result is True
-
-
-class TestPathInSystemPath:
-    """Tests for is_path_in_system_path function."""
-
-    def test_path_check(self, tmp_path: Path) -> None:
-        """Test checking if path is in system PATH."""
-        # A random temp path should not be in PATH
-        result = is_path_in_system_path(tmp_path)
-        assert result is False
-
-
-class TestPathSetupInstructions:
-    """Tests for get_path_setup_instructions function."""
-
-    def test_instructions_returned(self, tmp_path: Path) -> None:
-        """Test that instructions are returned."""
-        instructions = get_path_setup_instructions(tmp_path)
-        assert isinstance(instructions, str)
-        assert len(instructions) > 0
-        assert str(tmp_path) in instructions
-
-
-class TestBinaryConfigWithInstallLocation:
-    """Tests for BinaryConfig with install location features."""
-
-    def test_from_dict_with_binary_type(self) -> None:
-        """Test creating BinaryConfig with binary_type."""
-        data = {
-            "source_patterns": ["src/**/*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-            "binary_type": "cli",
-            "install_scope": "user",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-        assert config.binary_type == BinaryType.CLI
-        assert config.install_scope == InstallScope.USER
-
-    def test_from_dict_with_gui_type(self) -> None:
-        """Test creating BinaryConfig with GUI type."""
-        data = {
-            "source_patterns": ["src/**/*.swift"],
-            "build_cmd": "xcodebuild",
-            "install_path": "~/Applications/MyApp.app",
-            "binary_type": "gui",
-            "install_scope": "user",
-        }
-        config = BinaryConfig.from_dict("myapp", data)
-        assert config.binary_type == BinaryType.GUI
-        assert config.install_scope == InstallScope.USER
-
-    def test_default_install_path_auto_generated(self) -> None:
-        """Test that install_path is auto-generated if not specified."""
-        data = {
-            "source_patterns": ["src/**/*.go"],
-            "build_cmd": "go build",
-            "binary_type": "cli",
-            "install_scope": "user",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-        # Should have an auto-generated path
-        assert config.install_path != ""
-        assert "mytool" in config.install_path
-
-    def test_get_install_directory(self, tmp_path: Path) -> None:
-        """Test get_install_directory method."""
-        config = BinaryConfig(
-            name="mytool",
-            install_path=str(tmp_path / "bin" / "mytool"),
-        )
-        assert config.get_install_directory() == tmp_path / "bin"
-
-    def test_ensure_install_directory(self, tmp_path: Path) -> None:
-        """Test ensure_install_directory method."""
-        new_dir = tmp_path / "new_bin"
-        config = BinaryConfig(
-            name="mytool",
-            install_path=str(new_dir / "mytool"),
-        )
-        assert not new_dir.exists()
-        result = config.ensure_install_directory()
-        assert result is True
-        assert new_dir.exists()
-
-
-class TestShadowConflict:
-    """Tests for ShadowConflict dataclass."""
-
-    def test_basic_shadow_conflict(self) -> None:
-        """Test creating a ShadowConflict."""
-        from pre_commit.binary_track import ShadowConflict
-        conflict = ShadowConflict(
-            name="mytool",
-            path=Path("/usr/local/bin/mytool"),
-            scope=InstallScope.SYSTEM,
-            binary_type=BinaryType.CLI,
-            is_executable=True,
-            description="System-wide CLI tools",
-        )
-        assert conflict.name == "mytool"
-        assert conflict.scope == InstallScope.SYSTEM
-        assert conflict.is_executable is True
-
-    def test_shadow_conflict_str(self) -> None:
-        """Test string representation of ShadowConflict."""
-        from pre_commit.binary_track import ShadowConflict
-        conflict = ShadowConflict(
-            name="mytool",
-            path=Path("/usr/local/bin/mytool"),
-            scope=InstallScope.SYSTEM,
-            binary_type=BinaryType.CLI,
-        )
-        result = str(conflict)
-        assert "/usr/local/bin/mytool" in result
-        assert "system" in result
-
-
-class TestFindShadowConflicts:
-    """Tests for find_shadow_conflicts function."""
-
-    def test_no_conflicts_when_no_duplicates(self, tmp_path: Path) -> None:
-        """Test that no conflicts are found when binary doesn't exist elsewhere."""
-        from pre_commit.binary_track import find_shadow_conflicts
-        # Use a unique name that won't exist anywhere
-        conflicts = find_shadow_conflicts(
-            "unique_nonexistent_binary_12345",
-            tmp_path / "unique_nonexistent_binary_12345",
-            BinaryType.CLI,
-        )
-        assert conflicts == []
-
-    def test_finds_conflict_in_standard_location(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test that conflicts are found in standard locations."""
-        from pre_commit.binary_track import find_shadow_conflicts, get_default_install_locations
-
-        # Create a fake "other location" with a binary
-        other_bin = tmp_path / "system_bin"
-        other_bin.mkdir()
-        other_tool = other_bin / "mytool"
-        other_tool.touch()
-        other_tool.chmod(0o755)
-
-        # Mock get_default_install_locations to return our test location
-        original_func = get_default_install_locations
-
-        def mock_locations(binary_type=None, scope=None, target_platform=None):
-            from pre_commit.binary_track import InstallLocation, Platform
-            return [
-                InstallLocation(
-                    path=other_bin,
-                    scope=InstallScope.SYSTEM,
-                    binary_type=BinaryType.CLI,
-                    platform=Platform.MACOS,
-                    description="Test system location",
-                ),
-            ]
-
-        monkeypatch.setattr("pre_commit.binary_track.get_default_install_locations", mock_locations)
-
-        # Check for conflicts from a user location
-        user_install = tmp_path / "user_bin" / "mytool"
-        conflicts = find_shadow_conflicts("mytool", user_install, BinaryType.CLI)
-
-        assert len(conflicts) == 1
-        assert conflicts[0][0] == other_tool
-        assert conflicts[0][1] == InstallScope.SYSTEM
-
-    def test_ignores_same_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test that the installed binary's own path is not reported as a conflict."""
-        from pre_commit.binary_track import find_shadow_conflicts, get_default_install_locations
-
-        # Create a binary
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        tool = bin_dir / "mytool"
-        tool.touch()
-
-        # Mock locations to return the same location
-        def mock_locations(binary_type=None, scope=None, target_platform=None):
-            from pre_commit.binary_track import InstallLocation, Platform
-            return [
-                InstallLocation(
-                    path=bin_dir,
-                    scope=InstallScope.USER,
-                    binary_type=BinaryType.CLI,
-                    platform=Platform.MACOS,
-                    description="Test location",
-                ),
-            ]
-
-        monkeypatch.setattr("pre_commit.binary_track.get_default_install_locations", mock_locations)
-
-        # Should not report itself as a conflict
-        conflicts = find_shadow_conflicts("mytool", tool, BinaryType.CLI)
-        assert conflicts == []
-
-
-class TestPathPriority:
-    """Tests for get_path_priority function."""
-
-    def test_path_not_in_path(self, tmp_path: Path) -> None:
-        """Test priority for path not in PATH."""
-        from pre_commit.binary_track import get_path_priority
-        result = get_path_priority(tmp_path)
-        assert result == -1
-
-    def test_path_in_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test priority for path in PATH."""
-        from pre_commit.binary_track import get_path_priority
-        test_path = Path("/test/path")
-        monkeypatch.setenv("PATH", f"/first/path:/test/path:/third/path")
-        result = get_path_priority(test_path)
-        assert result == 1  # Second position (0-indexed)
-
-
-class TestCheckShadowPriority:
-    """Tests for check_shadow_priority function."""
-
-    def test_neither_in_path(self, tmp_path: Path) -> None:
-        """Test when neither path is in PATH."""
-        from pre_commit.binary_track import check_shadow_priority
-        result = check_shadow_priority(
-            tmp_path / "install" / "tool",
-            tmp_path / "conflict" / "tool",
-        )
-        assert "neither in PATH" in result
-
-    def test_install_takes_priority(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Test when install path takes priority."""
-        from pre_commit.binary_track import check_shadow_priority
-        install_dir = tmp_path / "first"
-        conflict_dir = tmp_path / "second"
-        monkeypatch.setenv("PATH", f"{install_dir}:{conflict_dir}")
-
-        result = check_shadow_priority(
-            install_dir / "tool",
-            conflict_dir / "tool",
-        )
-        assert "takes priority" in result
-
-    def test_shadowed_by_conflict(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Test when install is shadowed by conflict."""
-        from pre_commit.binary_track import check_shadow_priority
-        install_dir = tmp_path / "second"
-        conflict_dir = tmp_path / "first"
-        monkeypatch.setenv("PATH", f"{conflict_dir}:{install_dir}")
-
-        result = check_shadow_priority(
-            install_dir / "tool",
-            conflict_dir / "tool",
-        )
-        assert "shadowed by" in result
-
-
-class TestBinaryStatusResultWithShadows:
-    """Tests for BinaryStatusResult with shadow_conflicts field."""
-
-    def test_status_result_has_shadow_conflicts(self) -> None:
-        """Test that BinaryStatusResult includes shadow_conflicts."""
-        from pre_commit.binary_track import BinaryStatusResult, ShadowConflict
-        status = BinaryStatusResult(
-            name="mytool",
-            status=BinaryStatus.CURRENT,
-        )
-        assert hasattr(status, "shadow_conflicts")
-        assert status.shadow_conflicts == []
-
-    def test_status_result_with_conflicts(self) -> None:
-        """Test BinaryStatusResult with shadow conflicts."""
-        from pre_commit.binary_track import BinaryStatusResult, ShadowConflict
-        conflict = ShadowConflict(
-            name="mytool",
-            path=Path("/usr/local/bin/mytool"),
-            scope=InstallScope.SYSTEM,
-            binary_type=BinaryType.CLI,
-            is_executable=True,
-        )
-        status = BinaryStatusResult(
-            name="mytool",
-            status=BinaryStatus.CURRENT,
-            shadow_conflicts=[conflict],
-        )
-        assert len(status.shadow_conflicts) == 1
-        assert status.shadow_conflicts[0].path == Path("/usr/local/bin/mytool")
-
-
-class TestTrackResultWithShadows:
-    """Tests for TrackResult JSON output with shadow_conflicts."""
-
-    def test_to_dict_includes_shadow_conflicts(self) -> None:
-        """Test that to_dict includes shadow_conflicts in output."""
-        from pre_commit.binary_track import TrackResult, BinaryStatusResult, ShadowConflict
-        conflict = ShadowConflict(
-            name="mytool",
-            path=Path("/usr/local/bin/mytool"),
-            scope=InstallScope.SYSTEM,
-            binary_type=BinaryType.CLI,
-            is_executable=True,
-            description="System CLI tools",
-        )
-        status = BinaryStatusResult(
-            name="mytool",
-            status=BinaryStatus.CURRENT,
-            install_path="~/.local/bin/mytool",
-            shadow_conflicts=[conflict],
-        )
-        result = TrackResult(statuses=[status])
-        output = result.to_dict()
-
-        assert "statuses" in output
-        assert len(output["statuses"]) == 1
-        assert "shadow_conflicts" in output["statuses"][0]
-        assert len(output["statuses"][0]["shadow_conflicts"]) == 1
-        assert output["statuses"][0]["shadow_conflicts"][0]["path"] == "/usr/local/bin/mytool"
-        assert output["statuses"][0]["shadow_conflicts"][0]["scope"] == "system"
-        assert output["statuses"][0]["shadow_conflicts"][0]["is_executable"] is True
-
-
-class TestEnsureBinaryExecutable:
-    """Tests for the ensure_binary_executable function."""
-
-    def test_sets_executable_on_non_executable_file(self, tmp_path: Path) -> None:
-        """Test that it sets executable bit on a non-executable file."""
-        from pre_commit.binary_track import Logger
-
-        binary = tmp_path / "mytool"
-        binary.write_text("#!/bin/sh\necho hello")
-        # Explicitly no execute permission
-        binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-        assert not os.access(binary, os.X_OK)
-
-        logger = Logger(verbose=True, quiet=False)
-        result = ensure_binary_executable(binary, logger)
-
-        assert result is True
-        assert os.access(binary, os.X_OK)
-
-    def test_already_executable_returns_true(self, tmp_path: Path) -> None:
-        """Test that it returns True for already-executable files."""
-        from pre_commit.binary_track import Logger
-
-        binary = tmp_path / "mytool"
-        binary.write_text("#!/bin/sh\necho hello")
-        binary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-
-        assert os.access(binary, os.X_OK)
-
-        logger = Logger(verbose=True, quiet=False)
-        result = ensure_binary_executable(binary, logger)
-
-        assert result is True
-        assert os.access(binary, os.X_OK)
-
-    def test_skips_directories(self, tmp_path: Path) -> None:
-        """Test that it skips directories (e.g., .app bundles)."""
-        from pre_commit.binary_track import Logger
-
-        app_dir = tmp_path / "MyApp.app"
-        app_dir.mkdir()
-
-        logger = Logger(verbose=True, quiet=False)
-        result = ensure_binary_executable(app_dir, logger)
-
-        assert result is True  # Returns True for directories (skipped)
-
-    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
-        """Test that it returns False for missing files."""
-        from pre_commit.binary_track import Logger
-
-        binary = tmp_path / "nonexistent"
-
-        logger = Logger(verbose=True, quiet=False)
-        result = ensure_binary_executable(binary, logger)
-
-        assert result is False
-
-    def test_dry_run_does_not_change_permissions(self, tmp_path: Path) -> None:
-        """Test that dry_run logs but doesn't change permissions."""
-        from pre_commit.binary_track import Logger
-
-        binary = tmp_path / "mytool"
-        binary.write_text("#!/bin/sh\necho hello")
-        binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-        assert not os.access(binary, os.X_OK)
-
-        logger = Logger(verbose=True, quiet=False)
-        result = ensure_binary_executable(binary, logger, dry_run=True)
-
-        assert result is True  # Returns True in dry-run
-        assert not os.access(binary, os.X_OK)  # But file is still not executable
-
-
-class TestEnsureExecutableConfig:
-    """Tests for ensure_executable configuration parsing."""
-
-    def test_binary_config_default_ensure_executable(self) -> None:
-        """Test that ensure_executable defaults to True."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.ensure_executable is True
-
-    def test_binary_config_explicit_ensure_executable_true(self) -> None:
-        """Test explicitly setting ensure_executable to True."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-            "ensure_executable": True,
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.ensure_executable is True
-
-    def test_binary_config_explicit_ensure_executable_false(self) -> None:
-        """Test explicitly setting ensure_executable to False."""
-        data = {
-            "source_patterns": ["*.c"],
-            "build_cmd": "gcc -shared -o libhelper.so helper.c",
-            "install_path": "~/.local/lib/libhelper.so",
-            "ensure_executable": False,
-        }
-        config = BinaryConfig.from_dict("libhelper", data)
-
-        assert config.ensure_executable is False
-
-    def test_track_config_default_ensure_executable(self) -> None:
-        """Test TrackConfig defaults ensure_executable to True."""
-        config = TrackConfig.from_dict({})
-
-        assert config.ensure_executable is True
-
-    def test_track_config_global_ensure_executable_false(self) -> None:
-        """Test TrackConfig respects global ensure_executable setting."""
-        data: ConfigDict = {
-            "ensure_executable": False,
+        config = load_config_file(config_path, tmp_path)
+        assert "mytool" in config.get("binaries", {})
+
+    def test_merge_configs(self) -> None:
+        """Test merging multiple configs."""
+        config1: ConfigDict = {
             "binaries": {
-                "mytool": {
-                    "source_patterns": ["*.go"],
-                    "build_cmd": "go build",
-                    "install_path": "~/.local/bin/mytool",
-                },
+                "tool1": {"source_patterns": ["**/*.go"]},
             },
         }
-        config = TrackConfig.from_dict(data)
-
-        assert config.ensure_executable is False
-        assert config.binaries["mytool"].ensure_executable is False
-
-    def test_binary_overrides_global_ensure_executable(self) -> None:
-        """Test per-binary setting overrides global."""
-        data: ConfigDict = {
-            "ensure_executable": False,
+        config2: ConfigDict = {
             "binaries": {
-                "mytool": {
-                    "source_patterns": ["*.go"],
-                    "build_cmd": "go build",
-                    "install_path": "~/.local/bin/mytool",
-                    "ensure_executable": True,  # Override global
-                },
-                "libhelper": {
-                    "source_patterns": ["*.c"],
-                    "build_cmd": "make libhelper.so",
-                    "install_path": "~/.local/lib/libhelper.so",
-                    # Inherits global False
-                },
+                "tool2": {"source_patterns": ["**/*.rs"]},
             },
+            "pre_commit_policy": "block",
         }
-        config = TrackConfig.from_dict(data)
 
-        assert config.ensure_executable is False
-        assert config.binaries["mytool"].ensure_executable is True  # Overridden
-        assert config.binaries["libhelper"].ensure_executable is False  # Inherited
-
-
-class TestBuildFailureReason:
-    """Tests for BuildFailureReason enum and categorization."""
-
-    def test_failure_reason_values(self) -> None:
-        """Test BuildFailureReason enum values."""
-        from pre_commit.binary_track import BuildFailureReason
-
-        assert BuildFailureReason.COMMAND_NOT_FOUND.value == "command_not_found"
-        assert BuildFailureReason.COMPILATION_ERROR.value == "compilation_error"
-        assert BuildFailureReason.LINKER_ERROR.value == "linker_error"
-        assert BuildFailureReason.TIMEOUT.value == "timeout"
-        assert BuildFailureReason.PERMISSION_DENIED.value == "permission_denied"
-        assert BuildFailureReason.MISSING_DEPENDENCY.value == "missing_dependency"
-        assert BuildFailureReason.TEST_FAILED.value == "test_failed"
-        assert BuildFailureReason.UNKNOWN.value == "unknown"
-
-
-class TestCategorizeBuildFailure:
-    """Tests for the categorize_build_failure function."""
-
-    def test_command_not_found(self) -> None:
-        """Test detection of command not found errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            127, "bash: go: command not found", "", "go"
-        )
-        assert reason == BuildFailureReason.COMMAND_NOT_FOUND
-        assert "go" in suggestion.lower()
-
-    def test_permission_denied(self) -> None:
-        """Test detection of permission denied errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            1, "error: permission denied: /usr/local/bin/mytool", "", ""
-        )
-        assert reason == BuildFailureReason.PERMISSION_DENIED
-        assert "permission" in suggestion.lower()
-
-    def test_missing_dependency(self) -> None:
-        """Test detection of missing file/dependency errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            1, "fatal: cannot find file 'main.go'", "", "go"
-        )
-        assert reason == BuildFailureReason.MISSING_DEPENDENCY
-
-    def test_go_compilation_error(self) -> None:
-        """Test detection of Go compilation errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            1, "undefined: someFunction", "", "go"
-        )
-        assert reason == BuildFailureReason.COMPILATION_ERROR
-
-    def test_rust_compilation_error(self) -> None:
-        """Test detection of Rust compilation errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            1, "error[E0425]: cannot find value", "", "rust"
-        )
-        assert reason == BuildFailureReason.COMPILATION_ERROR
-        assert "cargo" in suggestion.lower()
-
-    def test_linker_error(self) -> None:
-        """Test detection of linker errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            1, "undefined reference to `main'", "", "c"
-        )
-        assert reason == BuildFailureReason.LINKER_ERROR
-
-    def test_unknown_error(self) -> None:
-        """Test fallback to unknown for unrecognized errors."""
-        from pre_commit.binary_track import categorize_build_failure, BuildFailureReason
-
-        reason, suggestion = categorize_build_failure(
-            42, "some obscure error message", "", ""
-        )
-        assert reason == BuildFailureReason.UNKNOWN
-
-
-class TestRebuildResultEnhancements:
-    """Tests for enhanced RebuildResult dataclass."""
-
-    def test_rebuild_result_has_new_fields(self) -> None:
-        """Test that RebuildResult has all enhanced fields."""
-        from pre_commit.binary_track import RebuildResult, RebuildStatus, BuildFailureReason
-
-        result = RebuildResult(
-            name="mytool",
-            status=RebuildStatus.FAILED,
-            duration=5.5,
-            message="Build failed",
-            output="error output",
-            failure_reason=BuildFailureReason.COMPILATION_ERROR,
-            exit_code=1,
-            test_output="",
-            test_duration=0.0,
-            suggestion="Check the code",
-            retry_attempt=2,
-        )
-
-        assert result.name == "mytool"
-        assert result.status == RebuildStatus.FAILED
-        assert result.failure_reason == BuildFailureReason.COMPILATION_ERROR
-        assert result.exit_code == 1
-        assert result.suggestion == "Check the code"
-        assert result.retry_attempt == 2
-
-    def test_rebuild_result_defaults(self) -> None:
-        """Test RebuildResult default values."""
-        from pre_commit.binary_track import RebuildResult, RebuildStatus
-
-        result = RebuildResult(name="mytool", status=RebuildStatus.SUCCESS)
-
-        assert result.failure_reason is None
-        assert result.exit_code is None
-        assert result.test_output == ""
-        assert result.test_duration == 0.0
-        assert result.suggestion == ""
-        assert result.retry_attempt == 0
-
-
-class TestRebuildStatusTestFailed:
-    """Tests for TEST_FAILED rebuild status."""
-
-    def test_test_failed_status_exists(self) -> None:
-        """Test that TEST_FAILED status exists."""
-        from pre_commit.binary_track import RebuildStatus
-
-        assert RebuildStatus.TEST_FAILED.value == "test_failed"
-
-
-class TestTestCommandConfig:
-    """Tests for test_cmd configuration parsing."""
-
-    def test_binary_config_default_test_cmd(self) -> None:
-        """Test that test_cmd defaults to empty string."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.test_cmd == ""
-        assert config.test_timeout == 60
-        assert config.retry_count == 0
-        assert config.retry_delay_seconds == 1.0
-
-    def test_binary_config_with_test_cmd(self) -> None:
-        """Test parsing test_cmd from config."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-            "test_cmd": "go test ./...",
-            "test_timeout": 120,
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.test_cmd == "go test ./..."
-        assert config.test_timeout == 120
-
-    def test_binary_config_with_retry(self) -> None:
-        """Test parsing retry configuration."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-            "retry_count": 3,
-            "retry_delay_seconds": 2.5,
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.retry_count == 3
-        assert config.retry_delay_seconds == 2.5
-
-    def test_binary_config_full_test_and_retry(self) -> None:
-        """Test parsing full test and retry configuration."""
-        data = {
-            "source_patterns": ["cmd/**/*.go"],
-            "build_cmd": "go build -o ~/.local/bin/mytool ./cmd/mytool",
-            "install_path": "~/.local/bin/mytool",
-            "language": "go",
-            "test_cmd": "go test -v ./...",
-            "test_timeout": 180,
-            "retry_count": 2,
-            "retry_delay_seconds": 5.0,
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.test_cmd == "go test -v ./..."
-        assert config.test_timeout == 180
-        assert config.retry_count == 2
-        assert config.retry_delay_seconds == 5.0
-        assert config.language == "go"
+        merged = merge_configs(config1, config2)
+        assert "tool1" in merged["binaries"]
+        assert "tool2" in merged["binaries"]
+        assert merged["pre_commit_policy"] == "block"
 
 
 # =============================================================================
-# Service Management Tests
+# CLI Argument Parsing Tests
 # =============================================================================
 
 
-class TestServiceType:
-    """Tests for the ServiceType enum."""
-
-    def test_service_type_values(self) -> None:
-        """Test that all expected service types exist."""
-        assert ServiceType.LAUNCHD.value == "launchd"
-        assert ServiceType.SYSTEMD.value == "systemd"
-        assert ServiceType.CUSTOM.value == "custom"
-        assert ServiceType.NONE.value == "none"
-
-
-class TestServiceStatus:
-    """Tests for the ServiceStatus enum."""
-
-    def test_service_status_values(self) -> None:
-        """Test that all expected service statuses exist."""
-        assert ServiceStatus.RUNNING.value == "running"
-        assert ServiceStatus.STOPPED.value == "stopped"
-        assert ServiceStatus.NOT_FOUND.value == "not_found"
-        assert ServiceStatus.UNKNOWN.value == "unknown"
-
-
-class TestServiceConfig:
-    """Tests for the ServiceConfig dataclass."""
-
-    def test_defaults(self) -> None:
-        """Test ServiceConfig default values."""
-        config = ServiceConfig()
-
-        assert config.enabled is False
-        assert config.service_type == ServiceType.NONE
-        assert config.name == ""
-        assert config.restart_after_build is True
-        assert config.stop_timeout_seconds == 30
-        assert config.start_timeout_seconds == 10
-        assert config.stop_cmd is None
-        assert config.start_cmd is None
-        assert config.status_cmd is None
-
-    def test_from_dict_empty(self) -> None:
-        """Test ServiceConfig.from_dict with empty dict."""
-        config = ServiceConfig.from_dict({})
-
-        assert config.enabled is False
-        assert config.service_type == ServiceType.NONE
-
-    def test_from_dict_launchd(self) -> None:
-        """Test ServiceConfig.from_dict for launchd service."""
-        data = {
-            "enabled": True,
-            "type": "launchd",
-            "name": "com.example.mytool",
-            "restart_after_build": True,
-        }
-        config = ServiceConfig.from_dict(data)
-
-        assert config.enabled is True
-        assert config.service_type == ServiceType.LAUNCHD
-        assert config.name == "com.example.mytool"
-        assert config.restart_after_build is True
-
-    def test_from_dict_systemd(self) -> None:
-        """Test ServiceConfig.from_dict for systemd service."""
-        data = {
-            "enabled": True,
-            "type": "systemd",
-            "name": "mytool.service",
-        }
-        config = ServiceConfig.from_dict(data)
-
-        assert config.enabled is True
-        assert config.service_type == ServiceType.SYSTEMD
-        assert config.name == "mytool.service"
-
-    def test_from_dict_custom(self) -> None:
-        """Test ServiceConfig.from_dict for custom service manager."""
-        data = {
-            "enabled": True,
-            "type": "custom",
-            "name": "mytool",
-            "stop_cmd": "supervisorctl stop mytool",
-            "start_cmd": "supervisorctl start mytool",
-            "status_cmd": "supervisorctl status mytool",
-        }
-        config = ServiceConfig.from_dict(data)
-
-        assert config.enabled is True
-        assert config.service_type == ServiceType.CUSTOM
-        assert config.stop_cmd == "supervisorctl stop mytool"
-        assert config.start_cmd == "supervisorctl start mytool"
-        assert config.status_cmd == "supervisorctl status mytool"
-
-    def test_from_dict_with_timeouts(self) -> None:
-        """Test ServiceConfig.from_dict with custom timeouts."""
-        data = {
-            "enabled": True,
-            "type": "launchd",
-            "name": "com.example.slowtool",
-            "stop_timeout_seconds": 60,
-            "start_timeout_seconds": 30,
-        }
-        config = ServiceConfig.from_dict(data)
-
-        assert config.stop_timeout_seconds == 60
-        assert config.start_timeout_seconds == 30
-
-    def test_from_dict_unknown_type_defaults_to_none(self) -> None:
-        """Test that unknown service types default to NONE."""
-        data = {
-            "enabled": True,
-            "type": "unknown_service_manager",
-            "name": "mytool",
-        }
-        config = ServiceConfig.from_dict(data)
-
-        assert config.service_type == ServiceType.NONE
-
-
-class TestServiceResult:
-    """Tests for the ServiceResult dataclass."""
-
-    def test_defaults(self) -> None:
-        """Test ServiceResult default values."""
-        result = ServiceResult(
-            name="myservice",
-            service_type=ServiceType.LAUNCHD,
-            status=ServiceStatus.RUNNING,
-            operation="status",
-        )
-
-        assert result.name == "myservice"
-        assert result.service_type == ServiceType.LAUNCHD
-        assert result.status == ServiceStatus.RUNNING
-        assert result.success is False
-        assert result.message == ""
-        assert result.duration == 0.0
-
-
-class TestBinaryConfigWithService:
-    """Tests for BinaryConfig service configuration."""
-
-    def test_binary_config_default_service(self) -> None:
-        """Test that service is disabled by default."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mytool",
-        }
-        config = BinaryConfig.from_dict("mytool", data)
-
-        assert config.service.enabled is False
-        assert config.service.service_type == ServiceType.NONE
-
-    def test_binary_config_with_launchd_service(self) -> None:
-        """Test parsing launchd service configuration."""
-        data = {
-            "source_patterns": ["*.go"],
-            "build_cmd": "go build",
-            "install_path": "~/.local/bin/mydaemon",
-            "service": {
-                "enabled": True,
-                "type": "launchd",
-                "name": "com.example.mydaemon",
-            },
-        }
-        config = BinaryConfig.from_dict("mydaemon", data)
-
-        assert config.service.enabled is True
-        assert config.service.service_type == ServiceType.LAUNCHD
-        assert config.service.name == "com.example.mydaemon"
-
-    def test_binary_config_with_custom_service(self) -> None:
-        """Test parsing custom service configuration."""
-        data = {
-            "source_patterns": ["*.rs"],
-            "build_cmd": "cargo build --release",
-            "install_path": "~/.local/bin/myserver",
-            "service": {
-                "enabled": True,
-                "type": "custom",
-                "name": "myserver",
-                "stop_cmd": "pkill -f myserver",
-                "start_cmd": "~/.local/bin/myserver &",
-            },
-        }
-        config = BinaryConfig.from_dict("myserver", data)
-
-        assert config.service.enabled is True
-        assert config.service.service_type == ServiceType.CUSTOM
-        assert config.service.stop_cmd == "pkill -f myserver"
-        assert config.service.start_cmd == "~/.local/bin/myserver &"
-
-
-class TestGetServiceStatus:
-    """Tests for the get_service_status function."""
-
-    def test_service_not_configured(self) -> None:
-        """Test status check when service is not configured."""
-        config = ServiceConfig()
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.UNKNOWN
-        assert "not configured" in result.message
-
-    @patch("subprocess.run")
-    def test_launchd_service_running(self, mock_run: MagicMock) -> None:
-        """Test detecting running launchd service."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.RUNNING
-        assert result.success is True
-        mock_run.assert_called_once()
-
-    @patch("subprocess.run")
-    def test_launchd_service_not_found(self, mock_run: MagicMock) -> None:
-        """Test detecting launchd service not found."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="Could not find service 'com.example.missing'",
-        )
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.missing",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.NOT_FOUND
-
-    @patch("subprocess.run")
-    def test_systemd_service_running(self, mock_run: MagicMock) -> None:
-        """Test detecting running systemd service."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="active\n", stderr="")
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.SYSTEMD,
-            name="test.service",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.RUNNING
-        assert result.success is True
-
-    @patch("subprocess.run")
-    def test_systemd_service_stopped(self, mock_run: MagicMock) -> None:
-        """Test detecting stopped systemd service."""
-        mock_run.return_value = MagicMock(returncode=3, stdout="inactive\n", stderr="")
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.SYSTEMD,
-            name="test.service",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.STOPPED
-
-    @patch("subprocess.run")
-    def test_custom_service_running(self, mock_run: MagicMock) -> None:
-        """Test detecting running custom service."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.CUSTOM,
-            name="myservice",
-            status_cmd="pgrep -f myservice",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.RUNNING
-        assert result.success is True
-
-    def test_custom_service_no_status_cmd(self) -> None:
-        """Test custom service without status command."""
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.CUSTOM,
-            name="myservice",
-        )
-        logger = MagicMock()
-
-        result = get_service_status(config, logger)
-
-        assert result.status == ServiceStatus.UNKNOWN
-        assert "No status command" in result.message
-
-
-class TestStopService:
-    """Tests for the stop_service function."""
-
-    def test_service_not_configured(self) -> None:
-        """Test stop when service is not configured."""
-        config = ServiceConfig()
-        logger = MagicMock()
-
-        result = stop_service(config, logger)
-
-        assert result.success is True
-        assert "not configured" in result.message
-
-    def test_dry_run(self) -> None:
-        """Test dry run mode."""
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = stop_service(config, logger, dry_run=True)
-
-        assert result.success is True
-        assert "[DRY-RUN]" in result.message
-
-    @patch("subprocess.run")
-    def test_launchd_stop_success(self, mock_run: MagicMock) -> None:
-        """Test successfully stopping launchd service."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = stop_service(config, logger)
-
-        assert result.success is True
-        assert result.status == ServiceStatus.STOPPED
-
-    @patch("subprocess.run")
-    def test_stop_failure(self, mock_run: MagicMock) -> None:
-        """Test stop failure."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="Failed to stop service",
-        )
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = stop_service(config, logger)
-
-        assert result.success is False
-
-    def test_custom_service_no_stop_cmd(self) -> None:
-        """Test custom service without stop command."""
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.CUSTOM,
-            name="myservice",
-        )
-        logger = MagicMock()
-
-        result = stop_service(config, logger)
-
-        assert result.success is False
-        assert "No stop command" in result.message
-
-
-class TestStartService:
-    """Tests for the start_service function."""
-
-    def test_service_not_configured(self) -> None:
-        """Test start when service is not configured."""
-        config = ServiceConfig()
-        logger = MagicMock()
-
-        result = start_service(config, logger)
-
-        assert result.success is True
-        assert "not configured" in result.message
-
-    def test_dry_run(self) -> None:
-        """Test dry run mode."""
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = start_service(config, logger, dry_run=True)
-
-        assert result.success is True
-        assert "[DRY-RUN]" in result.message
-
-    @patch("pre_commit.binary_track.get_service_status")
-    @patch("subprocess.run")
-    def test_launchd_start_success(
-        self, mock_run: MagicMock, mock_status: MagicMock
-    ) -> None:
-        """Test successfully starting launchd service."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mock_status.return_value = ServiceResult(
-            name="com.example.test",
-            service_type=ServiceType.LAUNCHD,
-            status=ServiceStatus.RUNNING,
-            operation="status",
-            success=True,
-        )
-
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.LAUNCHD,
-            name="com.example.test",
-        )
-        logger = MagicMock()
-
-        result = start_service(config, logger)
-
-        assert result.success is True
-        assert result.status == ServiceStatus.RUNNING
-
-    def test_custom_service_no_start_cmd(self) -> None:
-        """Test custom service without start command."""
-        config = ServiceConfig(
-            enabled=True,
-            service_type=ServiceType.CUSTOM,
-            name="myservice",
-        )
-        logger = MagicMock()
-
-        result = start_service(config, logger)
-
-        assert result.success is False
-        assert "No start command" in result.message
-
-
-class TestRebuildResultServiceFields:
-    """Tests for RebuildResult service tracking fields."""
-
-    def test_rebuild_result_has_service_fields(self) -> None:
-        """Test that RebuildResult has service tracking fields."""
-        from pre_commit.binary_track import RebuildResult
-
-        result = RebuildResult(name="test", status=RebuildStatus.SUCCESS)
-
-        assert hasattr(result, "service_stopped")
-        assert hasattr(result, "service_started")
-        assert hasattr(result, "service_status")
-
-    def test_rebuild_result_service_defaults(self) -> None:
-        """Test RebuildResult service field defaults."""
-        from pre_commit.binary_track import RebuildResult
-
-        result = RebuildResult(name="test", status=RebuildStatus.SUCCESS)
-
-        assert result.service_stopped is False
-        assert result.service_started is False
-        assert result.service_status == ServiceStatus.UNKNOWN
-
-
-class TestBuildFailureReasonServiceErrors:
-    """Tests for service-related build failure reasons."""
-
-    def test_service_stop_failed_reason(self) -> None:
-        """Test SERVICE_STOP_FAILED reason exists."""
-        assert BuildFailureReason.SERVICE_STOP_FAILED.value == "service_stop_failed"
-
-    def test_service_start_failed_reason(self) -> None:
-        """Test SERVICE_START_FAILED reason exists."""
-        assert BuildFailureReason.SERVICE_START_FAILED.value == "service_start_failed"
+class TestArgParsing:
+    """Tests for CLI argument parsing."""
+
+    def test_parse_check_staged(self) -> None:
+        """Test parsing --check-staged argument."""
+        args = parse_args(["--check-staged", "file1.go", "file2.go"])
+        assert args.check_staged
+        assert args.files == ["file1.go", "file2.go"]
+
+    def test_parse_project(self) -> None:
+        """Test parsing --project argument."""
+        args = parse_args(["--check-staged", "--project=apps/cli/mytool"])
+        assert args.projects == ["apps/cli/mytool"]
+
+    def test_parse_multiple_projects(self) -> None:
+        """Test parsing multiple --project arguments."""
+        args = parse_args([
+            "--check-staged",
+            "--project=apps/cli/tool1",
+            "--project=apps/cli/tool2",
+        ])
+        assert len(args.projects) == 2
+
+    def test_parse_binary_language(self) -> None:
+        """Test parsing --binary and --language arguments."""
+        args = parse_args([
+            "--check-staged",
+            "--binary=mytool",
+            "--language=rust",
+        ])
+        assert args.binaries == ["mytool"]
+        assert args.languages == ["rust"]
+
+    def test_parse_rebuild(self) -> None:
+        """Test parsing --rebuild argument."""
+        args = parse_args(["--rebuild", "--project=apps/cli/mytool"])
+        assert args.rebuild
+
+    def test_parse_health(self) -> None:
+        """Test parsing --health argument."""
+        args = parse_args(["--health", "--project=apps/cli/mytool"])
+        assert args.health
+
+    def test_parse_codesign(self) -> None:
+        """Test parsing --codesign argument."""
+        args = parse_args(["--codesign", "--project=apps/cli/mytool"])
+        assert args.codesign
+
+    def test_parse_dry_run(self) -> None:
+        """Test parsing --dry-run argument."""
+        args = parse_args(["--rebuild", "--dry-run"])
+        assert args.dry_run
+
+    def test_parse_verbose(self) -> None:
+        """Test parsing --verbose argument."""
+        args = parse_args(["-v", "--check-staged"])
+        assert args.verbose
+
+    def test_parse_json_output(self) -> None:
+        """Test parsing --json argument."""
+        args = parse_args(["--json", "--check-staged"])
+        assert args.json_output
 
 
 # =============================================================================
-# Language Presets Tests
+# Build Config From Args Tests
 # =============================================================================
 
 
-class TestLanguagePresets:
-    """Tests for language preset functionality."""
+class TestBuildConfigFromArgs:
+    """Tests for building config from CLI arguments."""
 
-    def test_get_language_preset_go(self) -> None:
-        """Test getting Go language preset."""
-        from pre_commit.binary_track import get_language_preset
+    def test_project_with_detection(self, tmp_path: Path) -> None:
+        """Test --project triggers auto-detection."""
+        project_path = tmp_path / "apps" / "cli" / "mytool"
+        project_path.mkdir(parents=True)
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'mytool'")
 
-        preset = get_language_preset("go")
-        assert preset is not None
-        assert preset.name == "go"
-        assert "**/*.go" in preset.source_patterns
-        assert "go build" in preset.default_build_cmd
+        args = parse_args(["--check-staged", f"--project={project_path}"])
+        config = build_config_from_args(args, tmp_path)
 
-    def test_get_language_preset_rust(self) -> None:
-        """Test getting Rust language preset."""
-        from pre_commit.binary_track import get_language_preset
+        assert "mytool" in config["binaries"]
+        assert config["binaries"]["mytool"]["language"] == "rust"
+        assert "**/*.rs" in config["binaries"]["mytool"]["source_patterns"]
 
-        preset = get_language_preset("rust")
-        assert preset is not None
-        assert preset.name == "rust"
-        assert "**/*.rs" in preset.source_patterns
-        assert "cargo" in preset.default_build_cmd
+    def test_explicit_binary_language(self, tmp_path: Path) -> None:
+        """Test --binary with --language."""
+        args = parse_args([
+            "--check-staged",
+            "--binary=mytool",
+            "--language=go",
+        ])
+        config = build_config_from_args(args, tmp_path)
 
-    def test_get_language_preset_uv(self) -> None:
-        """Test getting uv (Python) language preset."""
-        from pre_commit.binary_track import get_language_preset
-
-        preset = get_language_preset("uv")
-        assert preset is not None
-        assert preset.name == "uv"
-        assert "**/*.py" in preset.source_patterns
-        assert "uv.lock" in preset.source_patterns
-        assert "uv tool install --force" in preset.default_build_cmd
-
-    def test_get_language_preset_pnpm(self) -> None:
-        """Test getting pnpm (Node.js) language preset."""
-        from pre_commit.binary_track import get_language_preset
-
-        preset = get_language_preset("pnpm")
-        assert preset is not None
-        assert preset.name == "pnpm"
-        assert "**/*.ts" in preset.source_patterns or "**/*.js" in preset.source_patterns
-        assert "pnpm-lock.yaml" in preset.source_patterns
-        assert "pnpm" in preset.default_build_cmd
-
-    def test_get_language_preset_case_insensitive(self) -> None:
-        """Test that language names are case-insensitive."""
-        from pre_commit.binary_track import get_language_preset
-
-        assert get_language_preset("GO") is not None
-        assert get_language_preset("Go") is not None
-        assert get_language_preset("go") is not None
-
-    def test_get_language_preset_unknown(self) -> None:
-        """Test that unknown language returns None."""
-        from pre_commit.binary_track import get_language_preset
-
-        preset = get_language_preset("unknown_language")
-        assert preset is None
-
-    def test_list_language_presets(self) -> None:
-        """Test listing all language presets."""
-        from pre_commit.binary_track import list_language_presets
-
-        presets = list_language_presets()
-        assert len(presets) > 5  # Should have at least 5 presets
-        names = [p[0] for p in presets]
-        assert "go" in names
-        assert "rust" in names
-        assert "python" in names
-
-    def test_language_preset_get_build_cmd(self) -> None:
-        """Test that build cmd templates are filled correctly."""
-        from pre_commit.binary_track import get_language_preset
-
-        preset = get_language_preset("go")
-        assert preset is not None
-
-        build_cmd = preset.get_build_cmd("mytool")
-        assert "mytool" in build_cmd
-        assert "{name}" not in build_cmd  # Template should be replaced
-
-    def test_language_preset_get_install_path(self) -> None:
-        """Test that install path templates are filled correctly."""
-        from pre_commit.binary_track import get_language_preset
-
-        preset = get_language_preset("go")
-        assert preset is not None
-
-        install_path = preset.get_install_path("mytool")
-        assert "mytool" in install_path
-        assert "{name}" not in install_path
-
-    def test_all_presets_have_required_fields(self) -> None:
-        """Test that all presets have required fields."""
-        from pre_commit.binary_track import LANGUAGE_PRESETS
-
-        for name, preset in LANGUAGE_PRESETS.items():
-            assert preset.name == name
-            assert len(preset.source_patterns) > 0
-            assert preset.default_build_cmd
-            assert preset.default_install_path_template
-            assert len(preset.file_extensions) > 0
-            assert preset.description
-
-
-class TestDetectLanguageFromPatterns:
-    """Tests for language detection from patterns."""
-
-    def test_detect_go(self) -> None:
-        """Test detecting Go from patterns."""
-        from pre_commit.binary_track import detect_language_from_patterns
-
-        lang = detect_language_from_patterns(["**/*.go", "go.mod"])
-        assert lang == "go"
-
-    def test_detect_rust(self) -> None:
-        """Test detecting Rust from patterns."""
-        from pre_commit.binary_track import detect_language_from_patterns
-
-        lang = detect_language_from_patterns(["src/**/*.rs"])
-        assert lang == "rust"
-
-    def test_detect_unknown(self) -> None:
-        """Test detecting unknown language."""
-        from pre_commit.binary_track import detect_language_from_patterns
-
-        lang = detect_language_from_patterns(["**/*.xyz"])
-        assert lang is None
-
-
-# =============================================================================
-# Pre-commit Config Loading Tests
-# =============================================================================
-
-
-class TestLoadPreCommitConfig:
-    """Tests for loading config from .pre-commit-config.yaml."""
-
-    def test_load_no_config_file(self, tmp_path: Path) -> None:
-        """Test loading when no config file exists."""
-        from pre_commit.binary_track import load_pre_commit_config
-
-        config = load_pre_commit_config(tmp_path)
-        assert config == {}
-
-    def test_load_no_binary_track_hook(self, tmp_path: Path) -> None:
-        """Test loading when no binary-track hook is defined."""
-        from pre_commit.binary_track import load_pre_commit_config
-
-        config_path = tmp_path / ".pre-commit-config.yaml"
-        config_path.write_text("""
-repos:
-  - repo: local
-    hooks:
-      - id: some-other-hook
-        name: Other Hook
-        entry: other-hook
-        language: system
-""")
-        config = load_pre_commit_config(tmp_path)
-        assert config == {}
-
-    def test_load_binary_track_hook_with_policy(self, tmp_path: Path) -> None:
-        """Test loading binary-track hook with policy arg."""
-        from pre_commit.binary_track import load_pre_commit_config
-
-        config_path = tmp_path / ".pre-commit-config.yaml"
-        config_path.write_text("""
-repos:
-  - repo: local
-    hooks:
-      - id: binary-track
-        name: Binary Track
-        entry: binary-track
-        language: python
-        args:
-          - --policy=block
-          - --track-by=mtime
-""")
-        config = load_pre_commit_config(tmp_path)
-        assert config.get("pre_commit_policy") == "block"
-        assert config.get("track_by") == "mtime"
-
-    def test_load_binary_track_hook_with_binary(self, tmp_path: Path) -> None:
-        """Test loading binary-track hook with inline binary definition."""
-        from pre_commit.binary_track import load_pre_commit_config
-
-        config_path = tmp_path / ".pre-commit-config.yaml"
-        config_path.write_text("""
-repos:
-  - repo: local
-    hooks:
-      - id: binary-track
-        name: Binary Track
-        entry: binary-track
-        language: python
-        args:
-          - --binary=mytool
-          - --language=go
-""")
-        config = load_pre_commit_config(tmp_path)
-        assert "binaries" in config
         assert "mytool" in config["binaries"]
         assert config["binaries"]["mytool"]["language"] == "go"
 
-
-class TestParsePrecommitArgsToConfig:
-    """Tests for parsing pre-commit args to config."""
-
-    def test_parse_global_options(self) -> None:
-        """Test parsing global config options."""
-        from pre_commit.binary_track import _parse_precommit_args_to_config
-
-        args = ["--policy=warn", "--track-by=hash"]
-        config = _parse_precommit_args_to_config(args)
-
-        assert config["pre_commit_policy"] == "warn"
-        assert config["track_by"] == "hash"
-
-    def test_parse_single_binary(self) -> None:
-        """Test parsing a single binary definition."""
-        from pre_commit.binary_track import _parse_precommit_args_to_config
-
-        args = [
-            "--binary=mytool",
-            "--language=go",
-            "--install-path=~/.local/bin/mytool",
-        ]
-        config = _parse_precommit_args_to_config(args)
-
-        assert "mytool" in config["binaries"]
-        binary = config["binaries"]["mytool"]
-        assert binary["language"] == "go"
-        assert binary["install_path"] == "~/.local/bin/mytool"
-        # Language preset should fill in defaults
-        assert "source_patterns" in binary
-        assert "build_cmd" in binary
-
-    def test_parse_multiple_binaries(self) -> None:
-        """Test parsing multiple binary definitions."""
-        from pre_commit.binary_track import _parse_precommit_args_to_config
-
-        args = [
-            "--binary=tool1",
-            "--language=go",
-            "--binary=tool2",
-            "--language=rust",
-        ]
-        config = _parse_precommit_args_to_config(args)
-
-        assert len(config["binaries"]) == 2
-        assert "tool1" in config["binaries"]
-        assert "tool2" in config["binaries"]
-        assert config["binaries"]["tool1"]["language"] == "go"
-        assert config["binaries"]["tool2"]["language"] == "rust"
-
-    def test_parse_binary_with_custom_patterns(self) -> None:
-        """Test parsing binary with custom source patterns."""
-        from pre_commit.binary_track import _parse_precommit_args_to_config
-
-        args = [
-            "--binary=mytool",
-            "--source-patterns=src/**/*.go,pkg/**/*.go",
-            "--build-cmd=make build",
-        ]
-        config = _parse_precommit_args_to_config(args)
-
-        binary = config["binaries"]["mytool"]
-        assert binary["source_patterns"] == ["src/**/*.go", "pkg/**/*.go"]
-        assert binary["build_cmd"] == "make build"
-
-
-# =============================================================================
-# Inline Config Building Tests
-# =============================================================================
-
-
-class TestBuildInlineConfig:
-    """Tests for building config from inline CLI arguments."""
-
-    def test_build_empty_config(self) -> None:
-        """Test building config with no binaries."""
-        from argparse import Namespace
-
-        from pre_commit.binary_track import _build_inline_config
-
-        args = Namespace(
-            binaries=None,
-            languages=None,
-            source_patterns_list=None,
-            build_cmds=None,
-            install_paths=None,
-            test_cmds=None,
-            policy=None,
-            track_by=None,
-        )
-        config = _build_inline_config(args)
-        assert config == {"binaries": {}}
-
-    def test_build_single_binary_with_language(self) -> None:
-        """Test building config with a single binary using language preset."""
-        from argparse import Namespace
-
-        from pre_commit.binary_track import _build_inline_config
-
-        args = Namespace(
-            binaries=["mytool"],
-            languages=["go"],
-            source_patterns_list=None,
-            build_cmds=None,
-            install_paths=None,
-            test_cmds=None,
-            policy=None,
-            track_by=None,
-        )
-        config = _build_inline_config(args)
-
-        assert "mytool" in config["binaries"]
-        binary = config["binaries"]["mytool"]
-        assert binary["language"] == "go"
-        assert "source_patterns" in binary
-        assert "build_cmd" in binary
-        assert "install_path" in binary
-
-    def test_build_multiple_binaries(self) -> None:
-        """Test building config with multiple binaries."""
-        from argparse import Namespace
-
-        from pre_commit.binary_track import _build_inline_config
-
-        args = Namespace(
-            binaries=["tool1", "tool2"],
-            languages=["go", "rust"],
-            source_patterns_list=None,
-            build_cmds=None,
-            install_paths=None,
-            test_cmds=None,
-            policy=None,
-            track_by=None,
-        )
-        config = _build_inline_config(args)
-
-        assert len(config["binaries"]) == 2
-        assert config["binaries"]["tool1"]["language"] == "go"
-        assert config["binaries"]["tool2"]["language"] == "rust"
-
-    def test_build_with_explicit_overrides(self) -> None:
-        """Test that explicit values override language presets."""
-        from argparse import Namespace
-
-        from pre_commit.binary_track import _build_inline_config
-
-        args = Namespace(
-            binaries=["mytool"],
-            languages=["go"],
-            source_patterns_list=["custom/**/*.go"],
-            build_cmds=["make custom-build"],
-            install_paths=["/custom/path/mytool"],
-            test_cmds=["mytool --version"],
-            policy="block",
-            track_by="hash",
-        )
-        config = _build_inline_config(args)
-
-        binary = config["binaries"]["mytool"]
-        assert binary["source_patterns"] == ["custom/**/*.go"]
-        assert binary["build_cmd"] == "make custom-build"
-        assert binary["install_path"] == "/custom/path/mytool"
-        assert binary["test_cmd"] == "mytool --version"
+    def test_policy_setting(self, tmp_path: Path) -> None:
+        """Test --policy argument."""
+        args = parse_args(["--check-staged", "--policy=block"])
+        config = build_config_from_args(args, tmp_path)
         assert config["pre_commit_policy"] == "block"
-        assert config["track_by"] == "hash"
 
 
 # =============================================================================
-# Config Generation Tests
+# Main Function Tests
 # =============================================================================
 
 
-class TestGenerateConfigFile:
-    """Tests for generating config files."""
+class TestMain:
+    """Tests for main entry point."""
 
-    def test_generate_basic_config(self, tmp_path: Path) -> None:
-        """Test generating a basic config file."""
-        from pre_commit.binary_track import generate_config_file
+    def test_list_languages(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test --list-languages output."""
+        result = main(["--list-languages"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "rust" in captured.out.lower()
+        assert "go" in captured.out.lower()
+        assert "python" in captured.out.lower()
 
-        config = TrackConfig(
-            track_by=TrackingMethod.GIT_COMMIT,
-            pre_commit_policy=PreCommitPolicy.WARN,
-            binaries={
-                "mytool": BinaryConfig(
-                    name="mytool",
-                    language="go",
-                    source_patterns=["**/*.go"],
-                    build_cmd="go build",
-                    install_path="~/.local/bin/mytool",
-                ),
-            },
+    def test_check_staged_no_binaries(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --check-staged with no binaries configured."""
+        monkeypatch.chdir(tmp_path)
+        result = main(["--check-staged"])
+        assert result == 0
+
+    def test_check_staged_no_files(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --check-staged with no files."""
+        monkeypatch.chdir(tmp_path)
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        result = main(["--check-staged", f"--project={project_path}"])
+        assert result == 0
+
+    def test_check_staged_with_matching_files(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --check-staged with matching files."""
+        monkeypatch.chdir(tmp_path)
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        result = main([
+            "--check-staged",
+            f"--project={project_path}",
+            "mytool/src/main.rs",
+        ])
+        # With WARN policy, matching files still returns 0
+        assert result == 0
+
+    def test_check_staged_block_policy(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --check-staged with block policy."""
+        monkeypatch.chdir(tmp_path)
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        # Use relative path for --project since we're in tmp_path
+        result = main([
+            "--check-staged",
+            "--project=mytool",
+            "--policy=block",
+            "mytool/src/main.rs",
+        ])
+        # With BLOCK policy, matching files returns 1
+        assert result == 1
+
+    def test_health_missing_binary(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --health with missing binary."""
+        monkeypatch.chdir(tmp_path)
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        result = main(["--health", f"--project={project_path}"])
+        assert result == 1  # Missing binary is unhealthy
+
+    def test_rebuild_dry_run(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test --rebuild with --dry-run."""
+        monkeypatch.chdir(tmp_path)
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        result = main(["--rebuild", "--dry-run", f"--project={project_path}"])
+        assert result == 0
+
+
+# =============================================================================
+# Logger Tests
+# =============================================================================
+
+
+class TestLogger:
+    """Tests for Logger class."""
+
+    def test_quiet_mode(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test quiet mode suppresses output."""
+        logger = Logger(quiet=True)
+        logger.info("test info")
+        logger.success("test success")
+        logger.warn("test warn")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_verbose_mode(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test verbose mode shows debug output."""
+        logger = Logger(verbose=True)
+        logger.debug("test debug")
+        captured = capsys.readouterr()
+        assert "test debug" in captured.out
+
+    def test_non_verbose_hides_debug(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test non-verbose mode hides debug output."""
+        logger = Logger(verbose=False)
+        logger.debug("test debug")
+        captured = capsys.readouterr()
+        assert "test debug" not in captured.out
+
+    def test_error_goes_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test error output goes to stderr."""
+        logger = Logger()
+        logger.error("test error")
+        captured = capsys.readouterr()
+        assert "test error" in captured.err
+
+
+# =============================================================================
+# StagedCheckResult Tests
+# =============================================================================
+
+
+class TestStagedCheckResult:
+    """Tests for StagedCheckResult dataclass."""
+
+    def test_has_affected_empty(self) -> None:
+        """Test has_affected with no affected binaries."""
+        result = StagedCheckResult()
+        assert not result.has_affected
+
+    def test_has_affected_with_binaries(self) -> None:
+        """Test has_affected with affected binaries."""
+        result = StagedCheckResult(
+            affected_binaries=["mytool"],
+            file_matches={"mytool": ["main.rs"]},
         )
-        output_path = tmp_path / ".binariesrc.yaml"
-        content = generate_config_file(config, output_path)
+        assert result.has_affected
 
-        assert output_path.exists()
-        assert "mytool" in content
-        assert "language: go" in content
-        assert "track_by: git_commit" in content
-        assert "pre_commit_policy: warn" in content
-
-    def test_generate_config_with_codesign(self, tmp_path: Path) -> None:
-        """Test generating config with codesign settings."""
-        from pre_commit.binary_track import generate_config_file
-
-        config = TrackConfig(
-            track_by=TrackingMethod.GIT_COMMIT,
-            pre_commit_policy=PreCommitPolicy.WARN,
-            codesign=CodesignConfig(
-                enabled=True,
-                identity="Developer ID",
-            ),
-            binaries={
-                "mytool": BinaryConfig(
-                    name="mytool",
-                    source_patterns=["**/*.go"],
-                    build_cmd="go build",
-                    install_path="~/.local/bin/mytool",
-                ),
-            },
+    def test_to_dict(self) -> None:
+        """Test to_dict serialization."""
+        result = StagedCheckResult(
+            affected_binaries=["mytool"],
+            file_matches={"mytool": ["main.rs", "lib.rs"]},
+            total_files_checked=5,
         )
-        output_path = tmp_path / ".binariesrc.yaml"
-        content = generate_config_file(config, output_path)
+        data = result.to_dict()
+        assert data["affected_binaries"] == ["mytool"]
+        assert data["file_matches"]["mytool"] == ["main.rs", "lib.rs"]
+        assert data["total_files_checked"] == 5
+        assert data["has_affected"] is True
 
-        assert "codesign:" in content
-        assert "enabled: true" in content
-        assert "Developer ID" in content
 
-    def test_generated_config_is_valid_yaml(self, tmp_path: Path) -> None:
-        """Test that generated config is valid YAML."""
-        from pre_commit.binary_track import generate_config_file
+# =============================================================================
+# Integration Tests
+# =============================================================================
 
-        config = TrackConfig(
-            binaries={
-                "mytool": BinaryConfig(
-                    name="mytool",
-                    language="rust",
-                    source_patterns=["**/*.rs"],
-                    build_cmd="cargo build",
-                    install_path="~/.local/bin/mytool",
-                ),
-            },
+
+class TestIntegration:
+    """Integration tests for full workflows."""
+
+    def test_end_to_end_check_staged(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test complete check-staged workflow."""
+        monkeypatch.chdir(tmp_path)
+
+        # Set up a Rust project
+        project_path = tmp_path / "apps" / "cli" / "mytool"
+        project_path.mkdir(parents=True)
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'mytool'")
+        (project_path / "src").mkdir()
+        (project_path / "src" / "main.rs").write_text("fn main() {}")
+
+        # Run check-staged with matching files
+        result = main([
+            "--check-staged",
+            "--project=apps/cli/mytool",
+            "apps/cli/mytool/src/main.rs",
+        ])
+
+        # Should detect stale binary but not block (default WARN policy)
+        assert result == 0
+
+    def test_end_to_end_with_config_file(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        """Test workflow with config file."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create config file
+        config_file = tmp_path / ".binariesrc.yaml"
+        config_file.write_text(
+            """
+binaries:
+  mytool:
+    source_patterns:
+      - "**/*.rs"
+      - "Cargo.toml"
+    build_cmd: "cargo build --release"
+    install_path: "~/.local/bin/mytool"
+    language: rust
+"""
         )
-        output_path = tmp_path / ".binariesrc.yaml"
-        generate_config_file(config, output_path)
 
-        # Should be parseable as YAML
-        with open(output_path) as f:
-            parsed = yaml.safe_load(f)
+        # Run check-staged
+        result = main(["--check-staged", "src/main.rs"])
+        assert result == 0
 
-        assert "binaries" in parsed
-        assert "mytool" in parsed["binaries"]
+    def test_json_output(self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test JSON output format."""
+        monkeypatch.chdir(tmp_path)
+
+        project_path = tmp_path / "mytool"
+        project_path.mkdir()
+        (project_path / "Cargo.toml").write_text("[package]\nname = 'test'")
+
+        result = main([
+            "--check-staged",
+            "--json",
+            f"--project={project_path}",
+            "mytool/src/main.rs",
+        ])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "affected_binaries" in data
+        assert "file_matches" in data

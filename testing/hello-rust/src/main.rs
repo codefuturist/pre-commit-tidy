@@ -3,6 +3,6 @@ use std::env;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let name = if args.len() > 1 { &args[1] } else { "World" };
-    let greeting = format!("Hello again, {}! Testing pre-commit integration.", name);
+    let greeting = format!("Hello from Rust! Binary tracking works perfectly.", name);
     println!("{}", greeting);
 }

@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""lint-log - Run linters and capture JSON output to XDG-compliant log directory.
+
+Usage:
+    lint-log <linter> [files...]
+    lint-log ruff file1.py file2.py
+    lint-log mypy src/
+
+Supported linters: ruff, mypy, eslint, biome, pylint, flake8
+
+The log files are stored in:
+    $XDG_STATE_HOME/pre-commit/logs/{repo_hash}/{linter}.json
+"""
+import sys
+from pre_commit.ai_fix import lint_log_main
+
+if __name__ == '__main__':
+    sys.exit(lint_log_main())

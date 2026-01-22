@@ -200,6 +200,161 @@ BUILD_MANIFEST_FILE = ".binary-track-manifest.json"
 PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
 
 
+# =============================================================================
+# Language Presets - Auto-inferred patterns and build commands
+# =============================================================================
+
+
+@dataclass
+class LanguagePreset:
+    """Preset configuration for a programming language."""
+
+    name: str
+    source_patterns: list[str]
+    default_build_cmd: str
+    default_install_path_template: str  # Use {name} for binary name
+    file_extensions: list[str]
+    description: str
+
+    def get_build_cmd(self, name: str, install_path: str | None = None) -> str:
+        """Get build command with placeholders replaced."""
+        path = install_path or self.default_install_path_template.format(name=name)
+        return self.default_build_cmd.format(name=name, install_path=path)
+
+    def get_install_path(self, name: str) -> str:
+        """Get default install path for this language."""
+        return self.default_install_path_template.format(name=name)
+
+
+# Language presets with sensible defaults
+LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
+    "go": LanguagePreset(
+        name="go",
+        source_patterns=["**/*.go", "go.mod", "go.sum"],
+        default_build_cmd="go build -o {install_path} ./cmd/{name}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".go"],
+        description="Go (Golang)",
+    ),
+    "rust": LanguagePreset(
+        name="rust",
+        source_patterns=["**/*.rs", "Cargo.toml", "Cargo.lock"],
+        default_build_cmd="cargo build --release && cp target/release/{name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".rs"],
+        description="Rust",
+    ),
+    "python": LanguagePreset(
+        name="python",
+        source_patterns=["**/*.py", "pyproject.toml", "setup.py", "setup.cfg"],
+        default_build_cmd="pip install --user -e .",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".py"],
+        description="Python",
+    ),
+    "uv": LanguagePreset(
+        name="uv",
+        source_patterns=["**/*.py", "pyproject.toml", "uv.lock"],
+        default_build_cmd="uv tool install --force -e .",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".py"],
+        description="Python (uv)",
+    ),
+    "node": LanguagePreset(
+        name="node",
+        source_patterns=["**/*.ts", "**/*.js", "package.json", "package-lock.json"],
+        default_build_cmd="npm run build && npm link",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".ts", ".js"],
+        description="Node.js / TypeScript",
+    ),
+    "pnpm": LanguagePreset(
+        name="pnpm",
+        source_patterns=["**/*.ts", "**/*.js", "package.json", "pnpm-lock.yaml"],
+        default_build_cmd="pnpm run build && pnpm link --global",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".ts", ".js"],
+        description="Node.js / TypeScript (pnpm)",
+    ),
+    "swift": LanguagePreset(
+        name="swift",
+        source_patterns=["**/*.swift", "Package.swift"],
+        default_build_cmd="swift build -c release && cp .build/release/{name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".swift"],
+        description="Swift",
+    ),
+    "swift-app": LanguagePreset(
+        name="swift-app",
+        source_patterns=["**/*.swift", "**/*.xcodeproj/**", "**/*.xcworkspace/**"],
+        default_build_cmd="xcodebuild -scheme {name} -configuration Release -archivePath build/{name}.xcarchive archive",
+        default_install_path_template="~/Applications/{name}.app",
+        file_extensions=[".swift"],
+        description="Swift macOS/iOS App",
+    ),
+    "c": LanguagePreset(
+        name="c",
+        source_patterns=["**/*.c", "**/*.h", "Makefile", "CMakeLists.txt"],
+        default_build_cmd="make && cp {name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".c", ".h"],
+        description="C",
+    ),
+    "cpp": LanguagePreset(
+        name="cpp",
+        source_patterns=["**/*.cpp", "**/*.cc", "**/*.cxx", "**/*.hpp", "**/*.h", "Makefile", "CMakeLists.txt"],
+        default_build_cmd="cmake -B build && cmake --build build --config Release && cp build/{name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".cpp", ".cc", ".cxx", ".hpp"],
+        description="C++",
+    ),
+    "zig": LanguagePreset(
+        name="zig",
+        source_patterns=["**/*.zig", "build.zig"],
+        default_build_cmd="zig build -Doptimize=ReleaseFast && cp zig-out/bin/{name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".zig"],
+        description="Zig",
+    ),
+    "haskell": LanguagePreset(
+        name="haskell",
+        source_patterns=["**/*.hs", "**/*.cabal", "stack.yaml"],
+        default_build_cmd="stack build && stack install --local-bin-path $(dirname {install_path})",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".hs"],
+        description="Haskell",
+    ),
+    "elixir": LanguagePreset(
+        name="elixir",
+        source_patterns=["**/*.ex", "**/*.exs", "mix.exs"],
+        default_build_cmd="mix escript.build && cp {name} {install_path}",
+        default_install_path_template="~/.local/bin/{name}",
+        file_extensions=[".ex", ".exs"],
+        description="Elixir",
+    ),
+}
+
+
+def get_language_preset(language: str) -> LanguagePreset | None:
+    """Get a language preset by name."""
+    return LANGUAGE_PRESETS.get(language.lower())
+
+
+def list_language_presets() -> list[tuple[str, str]]:
+    """List available language presets as (name, description) tuples."""
+    return [(name, preset.description) for name, preset in sorted(LANGUAGE_PRESETS.items())]
+
+
+def detect_language_from_patterns(patterns: list[str]) -> str | None:
+    """Attempt to detect language from source patterns."""
+    pattern_str = " ".join(patterns).lower()
+    for lang, preset in LANGUAGE_PRESETS.items():
+        for ext in preset.file_extensions:
+            if ext in pattern_str:
+                return lang
+    return None
+
+
 class Platform(Enum):
     """Supported operating system platforms."""
 
@@ -1430,6 +1585,286 @@ def load_env_config() -> ConfigDict:
             config["codesign"]["identity"] = codesign_identity
 
     return config
+
+
+def load_pre_commit_config(root_dir: Path) -> ConfigDict:
+    """Load binary-track configuration from .pre-commit-config.yaml if present.
+
+    Parses the 'args' array from the binary-track hook definition and converts
+    them into a configuration dictionary, supporting both global settings and
+    inline binary definitions.
+    """
+    config_path = root_dir / PRE_COMMIT_CONFIG
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            pre_commit_config = yaml.safe_load(f)
+
+        # Look for binary-track hook configuration
+        for repo in pre_commit_config.get("repos", []):
+            for hook in repo.get("hooks", []):
+                if hook.get("id") == "binary-track":
+                    args = hook.get("args", [])
+                    return _parse_precommit_args_to_config(args)
+
+        return {}
+    except Exception:
+        return {}
+
+
+def _parse_precommit_args_to_config(args: list[str]) -> ConfigDict:
+    """Parse CLI-style args from pre-commit config into a config dict.
+
+    Supports multi-binary syntax where each --binary starts a new binary definition,
+    and subsequent args apply to that binary until another --binary is encountered.
+
+    Example args:
+        ['--policy=warn', '--track-by=git_commit',
+         '--binary=mytool', '--language=go', '--build-cmd=go build -o ~/.local/bin/mytool',
+         '--binary=othertool', '--language=rust']
+    """
+    config: ConfigDict = {"binaries": {}}
+    current_binary: str | None = None
+    current_binary_config: BinaryConfigDict = {}
+
+    def save_current_binary() -> None:
+        """Save the current binary config if one is being defined."""
+        nonlocal current_binary, current_binary_config
+        if current_binary and current_binary_config:
+            # Apply language preset if language specified but no patterns/build_cmd
+            if "language" in current_binary_config:
+                preset = get_language_preset(current_binary_config["language"])
+                if preset:
+                    # Only apply preset defaults if not explicitly set
+                    if "source_patterns" not in current_binary_config:
+                        current_binary_config["source_patterns"] = preset.source_patterns
+                    if "build_cmd" not in current_binary_config:
+                        install_path = current_binary_config.get("install_path")
+                        current_binary_config["build_cmd"] = preset.get_build_cmd(current_binary, install_path)
+                    if "install_path" not in current_binary_config:
+                        current_binary_config["install_path"] = preset.get_install_path(current_binary)
+
+            config["binaries"][current_binary] = current_binary_config
+            current_binary_config = {}
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        # Handle --key=value format
+        if "=" in arg and arg.startswith("--"):
+            key, value = arg.split("=", 1)
+            key = key[2:]  # Remove --
+
+            # Global config options
+            if key == "policy":
+                config["pre_commit_policy"] = value
+                i += 1
+                continue
+            elif key == "track-by":
+                config["track_by"] = value
+                i += 1
+                continue
+            elif key == "binary":
+                # Save previous binary and start new one
+                save_current_binary()
+                current_binary = value
+                current_binary_config = {}
+                i += 1
+                continue
+
+            # Per-binary config options (require current_binary)
+            if current_binary:
+                if key == "language":
+                    current_binary_config["language"] = value
+                elif key == "source-patterns":
+                    current_binary_config["source_patterns"] = [p.strip() for p in value.split(",")]
+                elif key == "build-cmd":
+                    current_binary_config["build_cmd"] = value
+                elif key == "install-path":
+                    current_binary_config["install_path"] = value
+                elif key == "test-cmd":
+                    current_binary_config["test_cmd"] = value
+                elif key == "working-dir":
+                    current_binary_config["working_dir"] = value
+                elif key == "binary-type":
+                    current_binary_config["binary_type"] = value
+                elif key == "install-scope":
+                    current_binary_config["install_scope"] = value
+                elif key == "timeout":
+                    current_binary_config["timeout"] = int(value)
+                elif key == "retry-count":
+                    current_binary_config["retry_count"] = int(value)
+
+            i += 1
+
+        # Handle --key value format (two separate args)
+        elif arg.startswith("--"):
+            key = arg[2:]
+
+            # Boolean flags that don't take values
+            if key == "verbose":
+                # Ignore, handled by CLI
+                i += 1
+                continue
+            elif key == "check":
+                # Ignore, handled by CLI
+                i += 1
+                continue
+            elif key == "no-rebuild-on-commit" and current_binary:
+                current_binary_config["rebuild_on_commit"] = False
+                i += 1
+                continue
+            elif key == "no-check-in-path" and current_binary:
+                current_binary_config["check_in_path"] = False
+                i += 1
+                continue
+
+            # Options that take the next arg as value
+            if i + 1 < len(args) and not args[i + 1].startswith("--"):
+                value = args[i + 1]
+
+                if key == "policy":
+                    config["pre_commit_policy"] = value
+                    i += 2
+                    continue
+                elif key == "track-by":
+                    config["track_by"] = value
+                    i += 2
+                    continue
+                elif key == "binary":
+                    save_current_binary()
+                    current_binary = value
+                    current_binary_config = {}
+                    i += 2
+                    continue
+
+                # Per-binary options
+                if current_binary:
+                    if key == "language":
+                        current_binary_config["language"] = value
+                        i += 2
+                        continue
+                    elif key == "source-patterns":
+                        current_binary_config["source_patterns"] = [p.strip() for p in value.split(",")]
+                        i += 2
+                        continue
+                    elif key == "build-cmd":
+                        current_binary_config["build_cmd"] = value
+                        i += 2
+                        continue
+                    elif key == "install-path":
+                        current_binary_config["install_path"] = value
+                        i += 2
+                        continue
+
+            i += 1
+        else:
+            i += 1
+
+    # Save the last binary being defined
+    save_current_binary()
+
+    return config
+
+
+def generate_config_file(
+    config: TrackConfig,
+    output_path: Path,
+    include_comments: bool = True,
+) -> str:
+    """Generate a .binariesrc.yaml config file from current configuration.
+
+    Args:
+        config: The TrackConfig to serialize
+        output_path: Path to write the config file
+        include_comments: Whether to include helpful comments
+
+    Returns:
+        The generated YAML content
+    """
+    lines: list[str] = []
+
+    if include_comments:
+        lines.extend([
+            "# Binary Track Configuration",
+            "# Generated by: binary-track --init",
+            "#",
+            "# Documentation: https://github.com/codefuturist/pre-commit-tidy",
+            "",
+        ])
+
+    # Global settings
+    lines.append("# Tracking method: git_commit (recommended), mtime, or hash")
+    lines.append(f"track_by: {config.track_by.value}")
+    lines.append("")
+
+    lines.append("# Pre-commit policy: warn, block, or ignore")
+    lines.append(f"pre_commit_policy: {config.pre_commit_policy.value}")
+    lines.append("")
+
+    if config.auto_rebuild:
+        lines.append("auto_rebuild: true")
+        lines.append("")
+
+    # Binaries
+    if config.binaries:
+        lines.append("binaries:")
+        for name, binary in config.binaries.items():
+            lines.append(f"  {name}:")
+            if binary.language:
+                lines.append(f"    language: {binary.language}")
+            if binary.source_patterns:
+                lines.append("    source_patterns:")
+                for pattern in binary.source_patterns:
+                    lines.append(f"      - \"{pattern}\"")
+            if binary.build_cmd:
+                lines.append(f"    build_cmd: \"{binary.build_cmd}\"")
+            if binary.install_path:
+                lines.append(f"    install_path: \"{binary.install_path}\"")
+            if binary.binary_type != BinaryType.CLI:
+                lines.append(f"    binary_type: {binary.binary_type.value}")
+            if binary.install_scope != InstallScope.USER:
+                lines.append(f"    install_scope: {binary.install_scope.value}")
+            if binary.working_dir != ".":
+                lines.append(f"    working_dir: \"{binary.working_dir}\"")
+            if binary.test_cmd:
+                lines.append(f"    test_cmd: \"{binary.test_cmd}\"")
+            if binary.timeout != 300:
+                lines.append(f"    timeout: {binary.timeout}")
+            if binary.retry_count > 0:
+                lines.append(f"    retry_count: {binary.retry_count}")
+                if binary.retry_delay_seconds != 1.0:
+                    lines.append(f"    retry_delay_seconds: {binary.retry_delay_seconds}")
+            if not binary.rebuild_on_commit:
+                lines.append("    rebuild_on_commit: false")
+            if not binary.check_in_path:
+                lines.append("    check_in_path: false")
+            lines.append("")
+
+    # Codesign config (if enabled)
+    if config.codesign.enabled:
+        lines.append("# Codesigning (macOS)")
+        lines.append("codesign:")
+        lines.append(f"  enabled: {str(config.codesign.enabled).lower()}")
+        lines.append(f"  identity: \"{config.codesign.identity}\"")
+        if config.codesign.entitlements:
+            lines.append(f"  entitlements: \"{config.codesign.entitlements}\"")
+        if config.codesign.options:
+            lines.append("  options:")
+            for opt in config.codesign.options:
+                lines.append(f"    - \"{opt}\"")
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # Write to file
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return content
 
 
 def save_manifest(manifest: BuildManifest, root_dir: Path) -> None:
@@ -3376,30 +3811,30 @@ Examples:
   binary-track --verify-signature # Verify codesign signatures
   binary-track --add              # Interactively add a new binary
   binary-track --remove mytool    # Remove a binary from tracking
+  binary-track --init             # Generate .binariesrc.yaml from current config
+  binary-track --list-languages   # Show available language presets
 
-Configuration:
-  Create .binariesrc.yaml in your project root with binary definitions.
+Inline Configuration (no config file needed):
+  binary-track --binary=mytool --language=go --check
+  binary-track --binary=mytool --language=rust --build-cmd="cargo build --release"
+  
+  # Multiple binaries:
+  binary-track --binary=tool1 --language=go --binary=tool2 --language=rust --check
 
-Tracking Methods:
-  - git_commit: Track source by git commit (recommended)
-  - mtime: Track source file modification times
-  - hash: Track source file content hashes
-
-Codesigning (macOS):
-  Enable per-binary or globally in config:
-    "codesign": {"enabled": true, "identity": "-"}
-  Use identity "-" for ad-hoc signing, or specify a certificate name.
+Language Presets:
+  Use --language to auto-configure source patterns and build commands.
+  Supported: go, rust, python, uv, node, pnpm, swift, swift-app, c, cpp, zig, haskell, elixir
 
 Pre-commit Integration:
   Add to .pre-commit-config.yaml:
-    - repo: local
+    - repo: https://github.com/codefuturist/pre-commit-tidy
+      rev: v2.0.0
       hooks:
         - id: binary-track
-          name: Check binary freshness
-          entry: binary-track --check
-          language: python
-          pass_filenames: false
-          always_run: true
+          args:
+            - --binary=mytool
+            - --language=go
+            - --policy=warn
 """,
     )
 
@@ -3481,6 +3916,77 @@ Pre-commit Integration:
         action="store_true",
         help="Show default install locations for current platform",
     )
+    action_group.add_argument(
+        "--init",
+        action="store_true",
+        help="Generate .binariesrc.yaml from current inline/pre-commit config",
+    )
+    action_group.add_argument(
+        "--list-languages",
+        action="store_true",
+        help="List available language presets",
+    )
+
+    # Inline binary definition arguments
+    inline_group = parser.add_argument_group(
+        "inline configuration",
+        "Define binaries directly via CLI (no config file needed)",
+    )
+    inline_group.add_argument(
+        "--binary",
+        action="append",
+        metavar="NAME",
+        dest="binaries",
+        help="Define a binary to track (can be repeated for multiple binaries)",
+    )
+    inline_group.add_argument(
+        "--language",
+        action="append",
+        metavar="LANG",
+        dest="languages",
+        help="Language preset for the preceding --binary (go, rust, python, etc.)",
+    )
+    inline_group.add_argument(
+        "--source-patterns",
+        action="append",
+        metavar="PATTERNS",
+        dest="source_patterns_list",
+        help="Comma-separated source patterns for the preceding --binary",
+    )
+    inline_group.add_argument(
+        "--build-cmd",
+        action="append",
+        metavar="CMD",
+        dest="build_cmds",
+        help="Build command for the preceding --binary",
+    )
+    inline_group.add_argument(
+        "--install-path",
+        action="append",
+        metavar="PATH",
+        dest="install_paths",
+        help="Install path for the preceding --binary",
+    )
+    inline_group.add_argument(
+        "--test-cmd",
+        action="append",
+        metavar="CMD",
+        dest="test_cmds",
+        help="Test command to verify the preceding --binary after build",
+    )
+
+    # Global config overrides
+    config_group = parser.add_argument_group("configuration overrides")
+    config_group.add_argument(
+        "--policy",
+        choices=["warn", "block", "ignore"],
+        help="Pre-commit policy (warn, block, ignore)",
+    )
+    config_group.add_argument(
+        "--track-by",
+        choices=["git_commit", "mtime", "hash"],
+        help="Tracking method (git_commit, mtime, hash)",
+    )
 
     # Options
     parser.add_argument(
@@ -3510,12 +4016,100 @@ Pre-commit Integration:
     return parser.parse_args(argv)
 
 
+def _build_inline_config(args: argparse.Namespace) -> ConfigDict:
+    """Build configuration from inline CLI arguments.
+
+    Handles the mapping of multiple --binary, --language, etc. arguments
+    to create a proper config dictionary with binary definitions.
+    """
+    config: ConfigDict = {"binaries": {}}
+
+    if not args.binaries:
+        return config
+
+    # Get lists with None padding for missing values
+    binaries = args.binaries or []
+    languages = args.languages or []
+    source_patterns = args.source_patterns_list or []
+    build_cmds = args.build_cmds or []
+    install_paths = args.install_paths or []
+    test_cmds = args.test_cmds or []
+
+    # Pad lists to match binaries length
+    def pad_list(lst: list[str | None], length: int) -> list[str | None]:
+        return lst + [None] * (length - len(lst))
+
+    languages = pad_list(languages, len(binaries))
+    source_patterns = pad_list(source_patterns, len(binaries))
+    build_cmds = pad_list(build_cmds, len(binaries))
+    install_paths = pad_list(install_paths, len(binaries))
+    test_cmds = pad_list(test_cmds, len(binaries))
+
+    for i, name in enumerate(binaries):
+        binary_config: BinaryConfigDict = {}
+
+        # Get values for this binary
+        language = languages[i] if i < len(languages) else None
+        patterns = source_patterns[i] if i < len(source_patterns) else None
+        build_cmd = build_cmds[i] if i < len(build_cmds) else None
+        install_path = install_paths[i] if i < len(install_paths) else None
+        test_cmd = test_cmds[i] if i < len(test_cmds) else None
+
+        # Apply language preset if specified
+        if language:
+            binary_config["language"] = language
+            preset = get_language_preset(language)
+            if preset:
+                # Use preset defaults, but allow overrides
+                if not patterns:
+                    binary_config["source_patterns"] = preset.source_patterns
+                if not build_cmd:
+                    final_install_path = install_path or preset.get_install_path(name)
+                    binary_config["build_cmd"] = preset.get_build_cmd(name, final_install_path)
+                if not install_path:
+                    binary_config["install_path"] = preset.get_install_path(name)
+
+        # Override with explicit values
+        if patterns:
+            binary_config["source_patterns"] = [p.strip() for p in patterns.split(",")]
+        if build_cmd:
+            binary_config["build_cmd"] = build_cmd
+        if install_path:
+            binary_config["install_path"] = install_path
+        if test_cmd:
+            binary_config["test_cmd"] = test_cmd
+
+        config["binaries"][name] = binary_config
+
+    # Global config overrides
+    if args.policy:
+        config["pre_commit_policy"] = args.policy
+    if args.track_by:
+        config["track_by"] = args.track_by
+
+    return config
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     args = parse_args(argv)
 
-    # Load configuration
+    # Handle --list-languages early (no config needed)
+    if args.list_languages:
+        print(f"\n{Colors.BOLD}Available Language Presets{Colors.RESET}\n")
+        for name, description in list_language_presets():
+            preset = get_language_preset(name)
+            if preset:
+                print(f"  {Colors.CYAN}{name:12}{Colors.RESET} {description}")
+                print(f"              Patterns: {', '.join(preset.source_patterns[:3])}...")
+                print(f"              Default install: {preset.default_install_path_template}")
+                print()
+        return 0
+
+    # Load configuration from multiple sources
     root_dir = Path.cwd()
+
+    # 1. Load from config file (lowest priority)
     try:
         file_config = load_config_file(args.config, root_dir)
     except FileNotFoundError as e:
@@ -3525,8 +4119,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{Colors.RED}Error:{Colors.RESET} Invalid YAML in config file: {e}", file=sys.stderr)
         return 1
 
+    # 2. Load from .pre-commit-config.yaml (medium priority)
+    precommit_config = load_pre_commit_config(root_dir)
+
+    # 3. Load from environment variables
     env_config = load_env_config()
-    merged_config: ConfigDict = {**file_config, **env_config}
+
+    # 4. Build inline config from CLI arguments (highest priority)
+    inline_config = _build_inline_config(args)
+
+    # Merge all configs (later sources override earlier ones)
+    # Special handling for binaries: merge rather than replace
+    merged_binaries: dict[str, Any] = {}
+    for cfg in [file_config, precommit_config, env_config, inline_config]:
+        if "binaries" in cfg:
+            for name, binary_cfg in cfg.get("binaries", {}).items():
+                if name in merged_binaries:
+                    merged_binaries[name].update(binary_cfg)
+                else:
+                    merged_binaries[name] = dict(binary_cfg)
+
+    # Merge non-binary config
+    merged_config: ConfigDict = {}
+    for cfg in [file_config, precommit_config, env_config, inline_config]:
+        for key, value in cfg.items():
+            if key != "binaries":
+                merged_config[key] = value
+
+    merged_config["binaries"] = merged_binaries
     config = TrackConfig.from_dict(merged_config, root_dir)
 
     # Set global config for binary path resolution
@@ -3549,18 +4169,56 @@ def main(argv: list[str] | None = None) -> int:
         show_install_locations(logger, config.json_output)
         return 0
 
+    # Handle --init: generate config file from current configuration
+    if args.init:
+        if not config.binaries:
+            logger.error("No binaries defined. Use --binary to define binaries first:")
+            logger.info("  binary-track --binary=mytool --language=go --init")
+            return 1
+
+        output_path = root_dir / ".binariesrc.yaml"
+        if output_path.exists():
+            logger.warn(f"{output_path} already exists. Use a different name or remove it first.")
+            # Offer alternative name
+            alt_path = root_dir / ".binariesrc.generated.yaml"
+            logger.info(f"Writing to {alt_path} instead...")
+            output_path = alt_path
+
+        content = generate_config_file(config, output_path)
+        logger.success(f"Generated configuration file: {output_path}")
+
+        if config.verbose:
+            print(f"\n{Colors.GRAY}--- Generated content ---{Colors.RESET}")
+            print(content)
+            print(f"{Colors.GRAY}--- End ---{Colors.RESET}\n")
+
+        logger.info("You can now remove inline args from .pre-commit-config.yaml")
+        logger.info("and the configuration will be loaded from the generated file.")
+        return 0
+
     # Check if we have any binaries configured (for most actions)
     if not config.binaries and not args.add:
         if not args.json_output:
-            logger.info("No binaries configured. Use --add to add a binary or create .binariesrc.yaml")
-            logger.info("\nExample configuration:")
+            logger.info("No binaries configured.")
+            logger.info("")
+            logger.info(f"{Colors.BOLD}Quick Start (no config file):{Colors.RESET}")
+            logger.info("  binary-track --binary=mytool --language=go --status")
+            logger.info("  binary-track --binary=mytool --language=go --check")
+            logger.info("")
+            logger.info(f"{Colors.BOLD}Available languages:{Colors.RESET} go, rust, python, uv, node, pnpm, swift, c, cpp, zig")
+            logger.info("  Run: binary-track --list-languages")
+            logger.info("")
+            logger.info(f"{Colors.BOLD}Generate config file:{Colors.RESET}")
+            logger.info("  binary-track --binary=mytool --language=go --init")
+            logger.info("")
+            logger.info(f"{Colors.BOLD}Or create .binariesrc.yaml manually:{Colors.RESET}")
             example = {
                 "binaries": {
                     "mytool": {
+                        "language": "go",
                         "source_patterns": ["cmd/mytool/**/*.go", "internal/**/*.go"],
                         "build_cmd": "go build -o ~/.local/bin/mytool ./cmd/mytool",
                         "install_path": "~/.local/bin/mytool",
-                        "language": "go",
                     }
                 },
                 "track_by": "git_commit",

@@ -1,0 +1,12 @@
+created_at: '2026-01-22T05:19:23.062762+00:00'
+updated_at: '2026-01-22T05:19:23.062762+00:00'
+records:
+  hello-rust:
+    binary_name: hello-rust
+    built_at: '2026-01-22T05:19:23.062387+00:00'
+    source_commit: ''
+    source_hashes: {}
+    source_mtimes: {}
+    build_duration: 3.440307378768921
+    success: true
+    error: ''

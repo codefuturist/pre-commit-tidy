@@ -234,8 +234,362 @@ CONFIG_FILE_NAMES = [
     'ai-fix.config.yaml',
 ]
 
-# Temp file for inter-hook communication
-LINT_RESULTS_FILE = '/tmp/ai-fix-lint-results.json'
+# Supported linters for log file detection
+SUPPORTED_LINTERS = ['ruff', 'mypy', 'eslint', 'pylint', 'flake8', 'biome']
+
+
+def get_state_home() -> Path:
+    """Get XDG_STATE_HOME directory following freedesktop.org spec.
+
+    $XDG_STATE_HOME is specifically designed for:
+    - Action history (logs, history, recently used files)
+    - Current state that should persist between restarts
+
+    Returns:
+        Path to state home directory
+    """
+    state_home = os.environ.get('XDG_STATE_HOME')
+    if state_home:
+        return Path(state_home)
+    return Path.home() / '.local' / 'state'
+
+
+def get_repo_root() -> Path | None:
+    """Get the root directory of the current git repository.
+
+    Returns:
+        Path to repo root, or None if not in a git repo
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def get_repo_hash(repo_root: Path | None = None) -> str:
+    """Generate a short hash for the repository path.
+
+    This provides per-repo isolation without polluting the repo itself.
+
+    Args:
+        repo_root: Repository root path (auto-detected if None)
+
+    Returns:
+        12-character hash string identifying the repo
+    """
+    if repo_root is None:
+        repo_root = get_repo_root()
+
+    if repo_root:
+        # Use resolved path for consistent hashing
+        path_str = str(repo_root.resolve())
+    else:
+        # Fallback to current directory for non-git projects
+        path_str = str(Path.cwd().resolve())
+
+    return hashlib.sha256(path_str.encode()).hexdigest()[:12]
+
+
+def get_log_dir(repo_root: Path | None = None) -> Path:
+    """Get the log directory for pre-commit linter output.
+
+    Follows XDG Base Directory Specification:
+    - Uses $XDG_STATE_HOME/pre-commit/logs/{repo_hash}/
+    - Falls back to ~/.local/state/pre-commit/logs/{repo_hash}/
+
+    This provides:
+    - Per-repo isolation (no cross-repo contamination)
+    - Standards compliance (XDG spec)
+    - No repository pollution
+    - Persistence across reboots
+    - Easy discoverability
+
+    Args:
+        repo_root: Repository root path (auto-detected if None)
+
+    Returns:
+        Path to log directory for this repository
+
+    Example:
+        ~/.local/state/pre-commit/logs/a1b2c3d4e5f6/
+    """
+    base = get_state_home() / 'pre-commit' / 'logs'
+    repo_hash = get_repo_hash(repo_root)
+    return base / repo_hash
+
+
+def get_linter_log_path(linter: str, repo_root: Path | None = None) -> Path:
+    """Get the log file path for a specific linter.
+
+    Args:
+        linter: Linter name (ruff, mypy, eslint, etc.)
+        repo_root: Repository root path (auto-detected if None)
+
+    Returns:
+        Path to the linter's JSON log file
+    """
+    return get_log_dir(repo_root) / f'{linter}.json'
+
+
+def ensure_log_dir(repo_root: Path | None = None) -> Path:
+    """Ensure the log directory exists and return its path.
+
+    Args:
+        repo_root: Repository root path (auto-detected if None)
+
+    Returns:
+        Path to the created/existing log directory
+    """
+    log_dir = get_log_dir(repo_root)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+# Legacy input methods removed - use load_errors_from_log_files() instead
+
+
+def load_errors_from_log_files(
+    log_files: list[Path] | None = None,
+    log_dir: Path | None = None,
+    repo_root: Path | None = None,
+) -> list[LintError]:
+    """Load errors from pre-commit log_file outputs.
+
+    This reads JSON log files created by pre-commit's log_file feature.
+    Each linter writes its JSON output directly to its log file.
+
+    Log files are stored in XDG-compliant location:
+        $XDG_STATE_HOME/pre-commit/logs/{repo_hash}/{linter}.json
+
+    Args:
+        log_files: Explicit list of log files to read
+        log_dir: Override directory containing log files
+        repo_root: Repository root (auto-detected if None)
+
+    Returns:
+        List of LintError objects
+    """
+    errors: list[LintError] = []
+
+    # Determine which files to read
+    files_to_read: list[tuple[str, Path]] = []
+
+    if log_files:
+        # Explicit list of files provided
+        for lf in log_files:
+            linter = _infer_linter_from_filename(lf.stem)
+            files_to_read.append((linter, lf))
+    else:
+        # Auto-discover log files in the log directory
+        search_dir = log_dir or get_log_dir(repo_root)
+
+        if search_dir.exists():
+            for filepath in search_dir.glob('*.json'):
+                linter = _infer_linter_from_filename(filepath.stem)
+                files_to_read.append((linter, filepath))
+
+    # Read each log file
+    for linter, filepath in files_to_read:
+        if not filepath.exists():
+            continue
+
+        try:
+            content = filepath.read_text().strip()
+            if not content:
+                continue
+
+            # Try to parse as JSON array
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                # Log file might have non-JSON header/footer from pre-commit
+                # Try to extract JSON array
+                json_match = re.search(r'\[[\s\S]*\]', content)
+                if json_match:
+                    data = json.loads(json_match.group())
+                else:
+                    logger.warning(f'Could not parse JSON from {filepath}')
+                    continue
+
+            # Parse based on linter type
+            if linter == 'ruff':
+                errors.extend(_parse_ruff_json(data))
+            elif linter == 'mypy':
+                errors.extend(_parse_mypy_json(data))
+            elif linter == 'eslint':
+                errors.extend(_parse_eslint_json(data))
+            elif linter == 'biome':
+                errors.extend(_parse_biome_json(data))
+            else:
+                errors.extend(_parse_generic_json(linter, data))
+
+            logger.debug(f'Loaded {len(data) if isinstance(data, list) else 1} items from {filepath}')
+
+        except Exception as e:
+            logger.warning(f'Failed to load log file {filepath}: {e}')
+            continue
+
+    return errors
+
+
+def _infer_linter_from_filename(stem: str) -> str:
+    """Infer linter name from log file stem."""
+    stem_lower = stem.lower()
+    for linter in SUPPORTED_LINTERS:
+        if linter in stem_lower:
+            return linter
+    return stem_lower
+
+
+def clear_log_files(
+    log_dir: Path | None = None,
+    repo_root: Path | None = None,
+) -> Path:
+    """Clear all linter log files for the current repository.
+
+    Used by a "clear" hook at the start of pre-commit to ensure fresh logs.
+
+    Args:
+        log_dir: Override directory to clear
+        repo_root: Repository root (auto-detected if None)
+
+    Returns:
+        Path to the (cleared and recreated) log directory
+    """
+    target_dir = log_dir or get_log_dir(repo_root)
+
+    if target_dir.exists():
+        for filepath in target_dir.glob('*.json'):
+            try:
+                filepath.unlink()
+            except OSError:
+                pass
+
+    # Ensure directory exists for subsequent writes
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _parse_biome_json(data: list[dict[str, Any]] | dict[str, Any]) -> list[LintError]:
+    """Parse Biome JSON output."""
+    errors = []
+    # Biome outputs diagnostics in a specific format
+    if isinstance(data, dict):
+        data = data.get('diagnostics', [])
+    if not isinstance(data, list):
+        return errors
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        location = item.get('location', {})
+        errors.append(LintError(
+            linter='biome',
+            file=location.get('path', {}).get('file', ''),
+            line=location.get('span', [0])[0] if location.get('span') else 0,
+            column=0,
+            code=item.get('category', ''),
+            message=item.get('message', ''),
+            severity=Severity.ERROR if item.get('severity') == 'error' else Severity.WARNING,
+        ))
+    return errors
+
+
+def _parse_ruff_json(data: list[dict[str, Any]]) -> list[LintError]:
+    """Parse ruff JSON output."""
+    errors = []
+    if not isinstance(data, list):
+        return errors
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        errors.append(LintError(
+            linter='ruff',
+            file=item.get('filename', ''),
+            line=item.get('location', {}).get('row', 0),
+            column=item.get('location', {}).get('column', 0),
+            code=item.get('code', ''),
+            message=item.get('message', ''),
+            severity=Severity.ERROR,
+            suggestion=item.get('fix', {}).get('message') if item.get('fix') else None,
+        ))
+    return errors
+
+
+def _parse_eslint_json(data: list[dict[str, Any]]) -> list[LintError]:
+    """Parse ESLint JSON output."""
+    errors = []
+    if not isinstance(data, list):
+        return errors
+
+    for file_result in data:
+        if not isinstance(file_result, dict):
+            continue
+        filepath = file_result.get('filePath', '')
+        for msg in file_result.get('messages', []):
+            severity = Severity.ERROR if msg.get('severity', 2) == 2 else Severity.WARNING
+            errors.append(LintError(
+                linter='eslint',
+                file=filepath,
+                line=msg.get('line', 0),
+                column=msg.get('column', 0),
+                code=msg.get('ruleId', ''),
+                message=msg.get('message', ''),
+                severity=severity,
+                suggestion=msg.get('fix', {}).get('text') if msg.get('fix') else None,
+            ))
+    return errors
+
+
+def _parse_mypy_json(data: list[dict[str, Any]]) -> list[LintError]:
+    """Parse mypy JSON output."""
+    errors = []
+    if not isinstance(data, list):
+        return errors
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        severity_str = item.get('severity', 'error')
+        severity = Severity.ERROR if severity_str == 'error' else Severity.WARNING
+        errors.append(LintError(
+            linter='mypy',
+            file=item.get('file', ''),
+            line=item.get('line', 0),
+            column=item.get('column', 0),
+            code=item.get('code', 'error'),
+            message=item.get('message', ''),
+            severity=severity,
+        ))
+    return errors
+
+
+def _parse_generic_json(linter: str, data: Any) -> list[LintError]:
+    """Parse generic linter JSON output."""
+    errors = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                errors.append(LintError(
+                    linter=linter,
+                    file=item.get('file', item.get('filename', item.get('path', ''))),
+                    line=item.get('line', item.get('row', 0)),
+                    column=item.get('column', item.get('col', 0)),
+                    code=item.get('code', item.get('rule', item.get('ruleId', ''))),
+                    message=item.get('message', item.get('msg', '')),
+                    severity=Severity.ERROR,
+                ))
+    return errors
+
+
+# Legacy functions removed - use load_errors_from_log_files() instead
 
 
 # =============================================================================
@@ -559,10 +913,12 @@ class Logger:
         verbose: bool = False,
         quiet: bool = False,
         json_output: bool = False,
+        show_ai_output: bool = False,
     ) -> None:
         self.verbose = verbose
         self.quiet = quiet
         self.json_output = json_output
+        self.show_ai_output = show_ai_output
         self._json_buffer: list[dict[str, Any]] = []
 
     def _print(self, message: str, force: bool = False) -> None:
@@ -605,6 +961,16 @@ class Logger:
                 self._json_buffer.append({'level': 'debug', 'message': message})
             else:
                 self._print(f'{Colors.DIM}  {message}{Colors.RESET}')
+
+    def ai_output(self, message: str) -> None:
+        """Print full AI output (only when show_ai_output is enabled)."""
+        if self.show_ai_output:
+            if self.json_output:
+                self._json_buffer.append({'level': 'ai_output', 'message': message})
+            else:
+                self._print(f'\n{Colors.CYAN}━━━ AI Response ━━━{Colors.RESET}')
+                self._print(message)
+                self._print(f'{Colors.CYAN}━━━━━━━━━━━━━━━━━━{Colors.RESET}\n')
 
     def header(self, message: str) -> None:
         """Print header message."""
@@ -903,8 +1269,8 @@ class BehaviorConfig:
     validate_fixes: bool = True
     max_fix_iterations: int = 3
     # Batching settings
-    batch_size_simple: int = 10     # Simple issues: batch up to 10
-    batch_size_moderate: int = 3    # Moderate issues: batch up to 3
+    batch_size_simple: int = 1      # Simple issues: one at a time (default)
+    batch_size_moderate: int = 1    # Moderate issues: one at a time (default)
     batch_size_complex: int = 1     # Complex issues: one at a time
     rerun_after_batch: bool = True  # Re-run linters after each batch
 
@@ -922,8 +1288,8 @@ class BehaviorConfig:
             context_lines=data.get('context_lines', 5),
             validate_fixes=data.get('validate_fixes', True),
             max_fix_iterations=data.get('max_fix_iterations', 3),
-            batch_size_simple=data.get('batch_size_simple', 10),
-            batch_size_moderate=data.get('batch_size_moderate', 3),
+            batch_size_simple=data.get('batch_size_simple', 1),
+            batch_size_moderate=data.get('batch_size_moderate', 1),
             batch_size_complex=data.get('batch_size_complex', 1),
             rerun_after_batch=data.get('rerun_after_batch', True),
         )
@@ -1425,6 +1791,31 @@ class AIProviderBase(ABC):
             complexity = ErrorComplexity.MODERATE
         return self.config.get_model_for_complexity(self.name, complexity)
 
+    def fix_file_directly(
+        self,
+        filepath: Path,
+        errors: list[LintError],
+        complexity: ErrorComplexity | None = None,
+    ) -> tuple[bool, str]:
+        """Have the AI directly edit the file to fix errors.
+
+        This is an optional method that providers can implement if they
+        support direct file editing. The default implementation returns False.
+
+        Args:
+            filepath: Path to the file to fix
+            errors: List of lint errors to fix
+            complexity: Error complexity for model selection
+
+        Returns:
+            tuple[bool, str]: (success, explanation)
+        """
+        return False, 'Direct file editing not supported by this provider'
+
+    def supports_direct_edit(self) -> bool:
+        """Check if this provider supports direct file editing."""
+        return False
+
     def build_prompt(self, error: LintError, file_content: str, context: str) -> str:
         """Build a prompt for the AI."""
         return f"""Fix the following linting error in the code.
@@ -1446,9 +1837,11 @@ class AIProviderBase(ABC):
 1. Fix ONLY the specific error mentioned above
 2. Make minimal changes - do not refactor or change unrelated code
 3. Preserve the original code style and formatting
-4. Return ONLY the fixed code for the affected lines, no explanation
+4. IMPORTANT: Return EXACTLY the same code block shown above, with ONLY the error fixed
+5. Do NOT add extra functions, imports, or code not in the original context
+6. Do NOT return partial snippets - return the COMPLETE context block with the fix applied
 
-**Fixed code:**
+**Fixed code (return the complete fixed context block):**
 ```
 """
 
@@ -1476,6 +1869,10 @@ class CopilotCLIProvider(AIProviderBase):
         # Prefer new copilot CLI, fall back to gh copilot
         return is_binary_available('copilot') or is_binary_available('gh')
 
+    def supports_direct_edit(self) -> bool:
+        """Copilot CLI supports direct file editing via its tools."""
+        return is_binary_available('copilot')
+
     def _get_copilot_command(self) -> list[str]:
         """Get the appropriate copilot command."""
         if is_binary_available('copilot'):
@@ -1499,6 +1896,83 @@ class CopilotCLIProvider(AIProviderBase):
 
         # Fall back to legacy gh copilot
         return self._run_legacy_copilot(prompt)
+
+    def fix_file_directly(
+        self,
+        filepath: Path,
+        errors: list[LintError],
+        complexity: ErrorComplexity | None = None,
+    ) -> tuple[bool, str]:
+        """Have Copilot CLI directly edit the file to fix errors.
+
+        This method tells Copilot to use its file editing tools directly,
+        so we don't need to parse and apply fixes ourselves.
+
+        Returns:
+            tuple[bool, str]: (success, explanation)
+        """
+        if not is_binary_available('copilot'):
+            return False, 'Copilot CLI not available'
+
+        # Build a prompt that tells Copilot to fix the file directly
+        error_list = '\n'.join(
+            f'  - Line {e.line}: [{e.linter}:{e.code}] {e.message}'
+            for e in errors
+        )
+
+        prompt = f"""Fix the following linting errors in file {filepath}:
+
+{error_list}
+
+Instructions:
+1. Read the file at {filepath}
+2. Fix ONLY the specific errors listed above
+3. Make minimal changes - do not refactor or change unrelated code
+4. Write the fixed content back to the file
+5. Do NOT add any new functions, imports, or code that wasn't there before
+6. Preserve the original code style and formatting"""
+
+        model = self.get_model(complexity)
+        copilot_bin = get_binary('copilot')
+
+        # Run with --allow-all so Copilot can edit files directly
+        cmd = [
+            copilot_bin,
+            '-p', prompt,
+            '--allow-all',  # Allow file read/write
+            '--no-ask-user',
+            '--model', model,
+            '--add-dir', str(filepath.parent),  # Allow access to file's directory
+        ]
+
+        logger.debug(f'Running Copilot CLI direct fix with model: {model}')
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout or 180,
+                cwd=filepath.parent,
+            )
+
+            logger.ai_output(result.stdout)
+
+            if result.returncode == 0:
+                # Check if the output indicates success
+                output = result.stdout.lower()
+                if any(word in output for word in ['fixed', 'updated', 'wrote', 'saved', 'modified']):
+                    return True, f'Fixed by Copilot CLI ({model})'
+                # Even if no explicit success message, check if file was modified
+                return True, f'Copilot CLI completed ({model})'
+            else:
+                error_msg = result.stderr or result.stdout
+                return False, f'Copilot CLI failed: {error_msg[:200]}'
+
+        except subprocess.TimeoutExpired:
+            return False, 'Copilot CLI timed out'
+        except Exception as e:
+            return False, f'Copilot CLI error: {e}'
 
     def _build_fix_prompt(self, error: LintError, context: str) -> str:
         """Build a concise prompt for the fix."""
@@ -1544,6 +2018,9 @@ Return ONLY the fixed code, no explanation."""
             )
 
             if result.returncode == 0:
+                # Show full AI output if requested
+                logger.ai_output(result.stdout)
+                
                 fixed_code = self._extract_code(result.stdout)
                 if fixed_code:
                     return fixed_code, f'Fix by Copilot CLI ({model})'
@@ -1807,6 +2284,9 @@ class VibeProvider(AIProviderBase):
             )
 
             if result.returncode == 0:
+                # Show full AI output if requested
+                logger.ai_output(result.stdout)
+                
                 fixed_code = self._extract_code(result.stdout)
                 if fixed_code:
                     return fixed_code, f'Fix by Vibe CLI ({model})'
@@ -1833,6 +2313,74 @@ Code:
 ```
 
 Return ONLY the fixed code, no explanation."""
+
+    def supports_direct_edit(self) -> bool:
+        """Vibe CLI supports direct file editing via its tools."""
+        return is_binary_available('vibe')
+
+    def fix_file_directly(
+        self,
+        filepath: Path,
+        errors: list[LintError],
+        complexity: ErrorComplexity | None = None,
+    ) -> tuple[bool, str]:
+        """Have Vibe CLI directly edit the file to fix errors."""
+        if not is_binary_available('vibe'):
+            return False, 'Vibe CLI not available'
+
+        # Build a prompt that tells Vibe to fix the file directly
+        error_list = '\n'.join(
+            f'  - Line {e.line}: [{e.linter}:{e.code}] {e.message}'
+            for e in errors
+        )
+
+        prompt = f"""Fix the following linting errors in file {filepath}:
+
+{error_list}
+
+Instructions:
+1. Read the file at {filepath}
+2. Fix ONLY the specific errors listed above
+3. Make minimal changes - do not refactor or change unrelated code
+4. Write the fixed content back to the file
+5. Do NOT add any new functions, imports, or code that wasn't there before
+6. Preserve the original code style and formatting"""
+
+        model = self.get_model(complexity)
+        vibe_bin = get_binary('vibe')
+
+        # Run with -p for programmatic mode (auto-approves all tools)
+        cmd = [
+            vibe_bin,
+            '-p', prompt,  # Programmatic mode with auto-approve
+        ]
+
+        logger.debug(f'Running Vibe CLI direct fix with model: {model}')
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout or 180,
+                cwd=filepath.parent,
+            )
+
+            logger.ai_output(result.stdout)
+
+            if result.returncode == 0:
+                output = result.stdout.lower()
+                if any(word in output for word in ['fixed', 'updated', 'wrote', 'saved', 'modified']):
+                    return True, f'Fixed by Vibe CLI ({model})'
+                return True, f'Vibe CLI completed ({model})'
+            else:
+                error_msg = result.stderr or result.stdout
+                return False, f'Vibe CLI failed: {error_msg[:200]}'
+
+        except subprocess.TimeoutExpired:
+            return False, 'Vibe CLI timed out'
+        except Exception as e:
+            return False, f'Vibe CLI error: {e}'
 
     def _extract_code(self, output: str) -> str | None:
         """Extract code from Vibe output."""
@@ -2052,31 +2600,116 @@ def apply_fix(
     fixed_content: str,
     original_content: str,
 ) -> bool:
-    """Apply a fix to a file."""
+    """Apply a fix to a file.
+
+    Uses multiple strategies for reliable fixing:
+    1. Exact string replacement of context -> fixed
+    2. Line-by-line diff to apply minimal changes
+    3. Line-based replacement as fallback
+    """
     try:
-        # Read current file
+        # Read current file content
         with open(filepath) as f:
-            current_lines = f.readlines()
+            file_content = f.read()
 
-        # Parse the fixed content to determine which lines to replace
-        fixed_lines = fixed_content.split('\n')
+        # Normalize content (strip trailing whitespace, normalize newlines)
+        def normalize(s: str) -> str:
+            return '\n'.join(line.rstrip() for line in s.strip().split('\n'))
 
-        # Calculate line range to replace
-        start_line = error.context_start_line - 1 if error.context_start_line > 0 else max(0, error.line - 6)
-        end_line = start_line + len(original_content.split('\n'))
+        original_normalized = normalize(original_content)
+        fixed_normalized = normalize(fixed_content)
 
-        # Replace lines
-        new_lines = (
-            current_lines[:start_line] +
-            [line + '\n' for line in fixed_lines] +
-            current_lines[end_line:]
-        )
+        # If no actual change, skip
+        if original_normalized == fixed_normalized:
+            logger.debug('No change detected, skipping')
+            return True
 
-        # Write back
-        with open(filepath, 'w') as f:
-            f.writelines(new_lines)
+        # Strategy 1: Try exact string replacement
+        if original_normalized in file_content:
+            new_content = file_content.replace(original_normalized, fixed_normalized, 1)
+            with open(filepath, 'w') as f:
+                f.write(new_content)
+            return True
 
-        return True
+        # Strategy 2: Try matching with preserved whitespace
+        original_stripped = original_content.strip()
+        if original_stripped in file_content:
+            new_content = file_content.replace(original_stripped, fixed_normalized, 1)
+            with open(filepath, 'w') as f:
+                f.write(new_content)
+            return True
+
+        # Strategy 3: Find the error line and try to match a subset
+        # This handles when AI returns partial context
+        file_lines = file_content.split('\n')
+        fixed_lines = fixed_normalized.split('\n')
+        original_lines = original_normalized.split('\n')
+
+        # Try to find where the original context starts in the file
+        error_line_idx = error.line - 1  # 0-indexed
+        context_start = error.context_start_line - 1 if error.context_start_line > 0 else max(0, error_line_idx - 5)
+        context_end = context_start + len(original_lines)
+
+        # Check if the file has the expected context
+        if context_start < len(file_lines):
+            # Try to match as many lines as possible
+            matched = True
+            for i, orig_line in enumerate(original_lines):
+                file_idx = context_start + i
+                if file_idx >= len(file_lines):
+                    matched = False
+                    break
+                if normalize(file_lines[file_idx]) != normalize(orig_line):
+                    matched = False
+                    break
+
+            if matched:
+                # Replace the matched range with fixed content
+                new_lines = (
+                    file_lines[:context_start] +
+                    fixed_lines +
+                    file_lines[context_end:]
+                )
+                new_content = '\n'.join(new_lines)
+                # Preserve trailing newline if original had one
+                if file_content.endswith('\n') and not new_content.endswith('\n'):
+                    new_content += '\n'
+                with open(filepath, 'w') as f:
+                    f.write(new_content)
+                return True
+
+        # Strategy 4: If AI returned fewer lines (partial fix), try to match
+        # just those lines within the context
+        if len(fixed_lines) < len(original_lines):
+            # Find which part of original matches the fixed content
+            for offset in range(len(original_lines) - len(fixed_lines) + 1):
+                subset = original_lines[offset:offset + len(fixed_lines)]
+                subset_str = '\n'.join(normalize(l) for l in subset)
+                if subset_str in file_content:
+                    new_content = file_content.replace(subset_str, fixed_normalized, 1)
+                    with open(filepath, 'w') as f:
+                        f.write(new_content)
+                    return True
+
+        # Strategy 5: Last resort - direct line replacement at error location
+        if error_line_idx < len(file_lines) and len(fixed_lines) > 0:
+            # Replace just around the error line
+            lines_to_replace = min(len(fixed_lines), len(file_lines) - error_line_idx)
+            new_lines = (
+                file_lines[:error_line_idx] +
+                fixed_lines[:lines_to_replace] +
+                file_lines[error_line_idx + lines_to_replace:]
+            )
+            new_content = '\n'.join(new_lines)
+            if file_content.endswith('\n') and not new_content.endswith('\n'):
+                new_content += '\n'
+            with open(filepath, 'w') as f:
+                f.write(new_content)
+            return True
+
+        logger.error(f'Could not find matching content to replace in {filepath}')
+        return False
+
     except Exception as e:
         logger.error(f'Failed to apply fix: {e}')
         return False
@@ -2187,12 +2820,14 @@ class AIFixRunner:
         auto_mode: bool = False,
         explain: bool = False,
         check_only: bool = False,
+        direct_edit: bool = False,
     ) -> None:
         self.config = config
         self.dry_run = dry_run
         self.auto_mode = auto_mode
         self.explain = explain
         self.check_only = check_only
+        self.direct_edit = direct_edit
         self.cache = FixCache(config.cache, config.root_dir)
         self.provider = self._get_provider()
         self.results: list[FixAttempt] = []
@@ -2234,27 +2869,46 @@ class AIFixRunner:
         logger.error('  - ollama: ollama serve')
         return None
 
-    def run(self, files: list[str] | None = None) -> int:
-        """Run the AI fix process."""
+    def run(
+        self,
+        files: list[str] | None = None,
+        preloaded_errors: list[LintError] | None = None,
+    ) -> int:
+        """Run the AI fix process.
+
+        Args:
+            files: Files to check (default: staged files)
+            preloaded_errors: Pre-collected errors to fix (skips linter run)
+        """
         # Get files to check
         if not files:
             files = get_staged_files()
-            if not files:
+            if not files and not preloaded_errors:
                 logger.info('No staged files to check')
                 return 0
 
-        logger.header(f'Checking {len(files)} file(s)...')
+        if files:
+            logger.header(f'Checking {len(files)} file(s)...')
 
-        # Detect and run linters
-        linters = detect_linters(self.config.root_dir)
-        if not linters:
-            logger.warning('No linters detected for this project')
-            return 0
+        # Use preloaded errors or collect fresh ones
+        if preloaded_errors:
+            all_errors = preloaded_errors
+            linters = list({e.linter for e in all_errors})
+            # Get files from errors if not provided
+            if not files:
+                files = list({e.file for e in all_errors})
+            logger.info(f'Using {len(all_errors)} pre-collected error(s)')
+        else:
+            # Detect and run linters
+            linters = detect_linters(self.config.root_dir)
+            if not linters:
+                logger.warning('No linters detected for this project')
+                return 0
 
-        logger.debug(f'Using linters: {", ".join(linters)}')
+            logger.debug(f'Using linters: {", ".join(linters)}')
 
-        # Collect initial errors
-        all_errors = self._collect_errors(files, linters)
+            # Collect initial errors
+            all_errors = self._collect_errors(files, linters)
 
         if not all_errors:
             logger.success('No linting errors found!')
@@ -2280,7 +2934,80 @@ class AIFixRunner:
             logger.info('Install GitHub CLI (gh), set MISTRAL_API_KEY, or run Ollama')
             return 1
 
+        # Use direct edit mode if requested and provider supports it
+        if self.direct_edit and self.provider.supports_direct_edit():
+            return self._run_direct_edit(files, linters, all_errors)
+
         return self._run_iterative_fix(files, linters)
+
+    def _run_direct_edit(
+        self,
+        files: list[str],
+        linters: list[str],
+        errors: list[LintError],
+    ) -> int:
+        """Run AI fix using direct file editing mode.
+
+        In this mode, we tell the AI to edit files directly rather than
+        parsing its output and applying changes ourselves.
+        """
+        if not self.provider:
+            return 1
+
+        logger.info('Using direct file editing mode')
+
+        # Group errors by file
+        errors_by_file: dict[str, list[LintError]] = {}
+        for error in errors:
+            if error.file not in errors_by_file:
+                errors_by_file[error.file] = []
+            errors_by_file[error.file].append(error)
+
+        total_fixed = 0
+        total_failed = 0
+
+        for filepath, file_errors in errors_by_file.items():
+            logger.header(f'Fixing {filepath} ({len(file_errors)} errors)')
+
+            # Determine complexity (use highest complexity in batch)
+            max_complexity = max(
+                (e.complexity or ErrorComplexity.MODERATE for e in file_errors),
+                key=lambda c: {'simple': 0, 'moderate': 1, 'complex': 2}[c.value],
+            )
+
+            # Show errors being fixed
+            for error in file_errors:
+                logger.lint_error(error)
+
+            if self.dry_run:
+                logger.info('  (dry-run, skipping fix)')
+                continue
+
+            # Let AI fix the file directly
+            full_path = self.config.root_dir / filepath
+            success, explanation = self.provider.fix_file_directly(
+                full_path,
+                file_errors,
+                complexity=max_complexity,
+            )
+
+            if success:
+                logger.success(f'  → {explanation}')
+                total_fixed += len(file_errors)
+            else:
+                logger.error(f'  → {explanation}')
+                total_failed += len(file_errors)
+
+        # Re-check for remaining errors
+        logger.header('Re-checking for remaining errors...')
+        remaining_errors = self._collect_errors(files, linters)
+
+        if remaining_errors:
+            logger.warning(f'{len(remaining_errors)} error(s) remaining')
+            return 1
+        else:
+            logger.success(f'All errors fixed! ({total_fixed} fixed)')
+            return 0
 
     def _collect_errors(
         self,
@@ -2636,21 +3363,30 @@ def create_argument_parser() -> argparse.ArgumentParser:
         description='AI-powered linting error fixer with smart model selection',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
-Examples:
-  ai-fix --check                    Check for errors only
-  ai-fix --fix --dry-run            Preview fixes without applying
-  ai-fix --fix --auto               Auto-fix all errors
-  ai-fix --fix --provider ollama    Use local Ollama for fixes
-  ai-fix --fix --model gpt-5        Use specific model (overrides smart selection)
-  ai-fix --list-models              Show available models for each provider
+Common Usage:
+  ai-fix                              Auto-detect errors and show them
+  ai-fix --fix                        Fix errors (with prompts)
+  ai-fix --fix --auto                 Fix all errors automatically
 
-Smart Model Selection:
-  By default, ai-fix selects the best model based on error complexity:
-    - Simple errors (unused imports): Fast models (claude-haiku-4.5, codestral)
-    - Moderate errors (type hints): Balanced models (claude-sonnet-4, codellama:13b)
-    - Complex errors (security): Best models (claude-sonnet-4.5, qwen2.5-coder:32b)
+Quick Start:
+  1. Run linters:    pre-commit run ruff --all-files
+  2. Check errors:   ai-fix
+  3. Fix errors:     ai-fix --fix --auto
 
-  Use --model to override with a specific model for all errors.
+Setup (one-time):
+  ai-fix --init-log-dir               Show pre-commit config snippets
+  ai-fix --show-log-dir               Show where logs are stored
+
+Advanced:
+  ai-fix --fix --provider ollama      Use local Ollama for fixes
+  ai-fix --fix --model gpt-5          Use specific model
+  ai-fix --list-models                Show available models
+  ai-fix --clear-logs                 Clear linter log files
+
+Environment Variables:
+  AI_FIX_PROVIDER                     Default AI provider
+  AI_FIX_AUTO=true                    Enable auto mode
+  MISTRAL_API_KEY                     API key for Vibe/Mistral
         ''',
     )
 
@@ -2725,9 +3461,30 @@ Smart Model Selection:
         help='Files to check (default: staged files)',
     )
     parser.add_argument(
-        '--input',
+        '--from-logs',
+        nargs='*',
         type=Path,
-        help='Read lint results from file (for pre-commit integration)',
+        help='Read errors from pre-commit log files (auto-discovers from XDG_STATE_HOME)',
+    )
+    parser.add_argument(
+        '--log-dir',
+        type=Path,
+        help='Override log directory (default: $XDG_STATE_HOME/pre-commit/logs/{repo_hash})',
+    )
+    parser.add_argument(
+        '--clear-logs',
+        action='store_true',
+        help='Clear all linter log files (use as first hook in pre-commit)',
+    )
+    parser.add_argument(
+        '--show-log-dir',
+        action='store_true',
+        help='Show the log directory path for this repository and exit',
+    )
+    parser.add_argument(
+        '--init-log-dir',
+        action='store_true',
+        help='Create the log directory and print paths for use in pre-commit config',
     )
     parser.add_argument(
         '--max-retries',
@@ -2757,6 +3514,17 @@ Smart Model Selection:
         help='Process only one issue at a time (sets all batch sizes to 1)',
     )
     parser.add_argument(
+        '--direct-edit',
+        action='store_true',
+        default=True,
+        help='Let the AI edit files directly (default: enabled)',
+    )
+    parser.add_argument(
+        '--no-direct-edit',
+        action='store_true',
+        help='Disable direct file editing, parse AI output instead',
+    )
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Show detailed output',
@@ -2765,6 +3533,11 @@ Smart Model Selection:
         '--quiet', '-q',
         action='store_true',
         help='Suppress all output except errors',
+    )
+    parser.add_argument(
+        '--show-ai-output',
+        action='store_true',
+        help='Show full AI response (not just extracted code)',
     )
     parser.add_argument(
         '--json',
@@ -2836,6 +3609,7 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose,
         quiet=args.quiet,
         json_output=args.json,
+        show_ai_output=args.show_ai_output,
     )
 
     # Disable colors if not TTY
@@ -2900,8 +3674,97 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_iterations:
         config.behavior.max_fix_iterations = args.max_iterations
 
+    # Handle --show-log-dir (show log directory and exit)
+    if args.show_log_dir:
+        log_dir = args.log_dir or get_log_dir()
+        print(f'Log directory: {log_dir}')
+        print(f'Repository:    {get_repo_root() or Path.cwd()}')
+        print(f'Repo hash:     {get_repo_hash()}')
+        return 0
+
+    # Handle --init-log-dir (create log directory and show config)
+    if args.init_log_dir:
+        log_dir = ensure_log_dir()
+        print(f'Log directory created: {log_dir}')
+        print()
+        print('=' * 70)
+        print('PRE-COMMIT CONFIG SNIPPETS')
+        print('=' * 70)
+        print()
+        print('Add these hooks to your .pre-commit-config.yaml:')
+        print()
+        print('''# Clear logs at start (must be first hook)
+- repo: local
+  hooks:
+    - id: ai-fix-clear
+      name: Clear lint log files
+      entry: python3 -m pre_commit.ai_fix --clear-logs
+      language: system
+      always_run: true
+      pass_filenames: false
+
+# Python linting with log capture
+- repo: local
+  hooks:
+    - id: ruff
+      name: ruff
+      entry: python3 -c "from pre_commit.ai_fix import lint_log_main; exit(lint_log_main(['ruff'] + __import__('sys').argv[1:]))"
+      language: system
+      types_or: [python, pyi]
+
+# AI Fix (run manually after linters)
+- repo: local
+  hooks:
+    - id: ai-fix
+      name: AI Fix
+      entry: python3 -m pre_commit.ai_fix --fix --auto
+      language: system
+      pass_filenames: false
+      stages: [manual]  # Run: pre-commit run ai-fix --hook-stage manual
+''')
+        print('=' * 70)
+        print()
+        print('Quick start:')
+        print('  1. Run linters:  pre-commit run ruff --all-files')
+        print('  2. Fix errors:   ai-fix --fix --auto')
+        print()
+        print('Or just run: ai-fix --fix')
+        print('(It will auto-detect errors from log files)')
+        return 0
+
+    # Handle --clear-logs (clear log files at start of pre-commit run)
+    if args.clear_logs:
+        log_dir = args.log_dir if hasattr(args, 'log_dir') and args.log_dir else None
+        cleared_dir = clear_log_files(log_dir)
+        logger.info(f'Cleared log files in {cleared_dir}')
+        return 0
+
+    # Handle --from-logs (read pre-commit log_file outputs)
+    collected_errors: list[LintError] | None = None
+    if args.from_logs is not None:
+        # If --from-logs given without paths, auto-discover from XDG location
+        log_files = args.from_logs if args.from_logs else None
+        log_dir = args.log_dir if hasattr(args, 'log_dir') and args.log_dir else None
+        collected_errors = load_errors_from_log_files(log_files, log_dir)
+        if not collected_errors:
+            actual_log_dir = log_dir or get_log_dir()
+            logger.info(f'No errors found in log files at {actual_log_dir}')
+            return 0
+        logger.info(f'Loaded {len(collected_errors)} error(s) from log files')
+
+    # AUTO-DETECT: If no explicit input source, check if log files exist
+    if collected_errors is None and args.from_logs is None:
+        log_dir = get_log_dir()
+        if log_dir.exists() and any(log_dir.glob('*.json')):
+            collected_errors = load_errors_from_log_files()
+            if collected_errors:
+                logger.info(f'Auto-loaded {len(collected_errors)} error(s) from {log_dir}')
+
     # Default to check mode if neither --check nor --fix specified
     check_only = args.check or not args.fix
+
+    # Direct edit mode - let AI edit files directly (default: enabled)
+    direct_edit = args.direct_edit and not args.no_direct_edit
 
     # Create runner
     runner = AIFixRunner(
@@ -2910,10 +3773,12 @@ def main(argv: list[str] | None = None) -> int:
         auto_mode=args.auto or os.environ.get('AI_FIX_AUTO') == 'true',
         explain=args.explain,
         check_only=check_only,
+        direct_edit=direct_edit,
     )
 
     try:
-        return runner.run(args.files)
+        result = runner.run(args.files, preloaded_errors=collected_errors)
+        return result
     except KeyboardInterrupt:
         logger.info('\nInterrupted')
         return 130
@@ -2923,3 +3788,131 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
+# =============================================================================
+# lint-log: Wrapper to run linters and capture JSON output to XDG log directory
+# =============================================================================
+
+LINTER_CONFIGS = {
+    'ruff': {
+        'json_args': ['--output-format=json'],
+        'normal_args': ['--fix', '--exit-non-zero-on-fix'],
+        'command': 'ruff',
+        'subcommand': 'check',
+    },
+    'mypy': {
+        'json_args': ['--output=json'],
+        'normal_args': ['--ignore-missing-imports', '--no-error-summary'],
+        'command': 'mypy',
+        'subcommand': None,
+    },
+    'eslint': {
+        'json_args': ['--format=json'],
+        'normal_args': ['--fix'],
+        'command': 'eslint',
+        'subcommand': None,
+    },
+    'biome': {
+        'json_args': ['--reporter=json'],
+        'normal_args': ['--write'],
+        'command': 'biome',
+        'subcommand': 'check',
+    },
+    'pylint': {
+        'json_args': ['--output-format=json'],
+        'normal_args': [],
+        'command': 'pylint',
+        'subcommand': None,
+    },
+    'flake8': {
+        'json_args': ['--format=json'],
+        'normal_args': [],
+        'command': 'flake8',
+        'subcommand': None,
+    },
+}
+
+
+def lint_log_main(argv: list[str] | None = None) -> int:
+    """Run a linter and capture JSON output to XDG-compliant log directory.
+
+    This is a wrapper command for use in pre-commit hooks. It:
+    1. Runs the linter with JSON output, saving to the log directory
+    2. Runs the linter normally for display and exit code
+
+    Usage:
+        lint-log <linter> [files...]
+        lint-log ruff file1.py file2.py
+        lint-log mypy src/
+
+    The log files are stored in:
+        $XDG_STATE_HOME/pre-commit/logs/{repo_hash}/{linter}.json
+
+    This allows ai-fix to read linter output from multiple hooks:
+        ai-fix --from-logs --fix
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv:
+        print('Usage: lint-log <linter> [files...]', file=sys.stderr)
+        print('Supported linters: ' + ', '.join(LINTER_CONFIGS.keys()), file=sys.stderr)
+        return 2
+
+    linter = argv[0].lower()
+    files = argv[1:]
+
+    if linter in ('--help', '-h'):
+        print(lint_log_main.__doc__)
+        print('\nSupported linters:', ', '.join(LINTER_CONFIGS.keys()))
+        return 0
+
+    if linter not in LINTER_CONFIGS:
+        print(f'Unknown linter: {linter}', file=sys.stderr)
+        print('Supported: ' + ', '.join(LINTER_CONFIGS.keys()), file=sys.stderr)
+        return 2
+
+    config = LINTER_CONFIGS[linter]
+
+    # Ensure log directory exists
+    log_dir = ensure_log_dir()
+    log_file = log_dir / f'{linter}.json'
+
+    # Build the JSON output command
+    json_cmd = [config['command']]
+    if config['subcommand']:
+        json_cmd.append(config['subcommand'])
+    json_cmd.extend(config['json_args'])
+    json_cmd.extend(files)
+
+    # Build the normal display command
+    normal_cmd = [config['command']]
+    if config['subcommand']:
+        normal_cmd.append(config['subcommand'])
+    normal_cmd.extend(config['normal_args'])
+    normal_cmd.extend(files)
+
+    # Run JSON output command and save to log file
+    try:
+        result = subprocess.run(
+            json_cmd,
+            capture_output=True,
+            text=True,
+        )
+        # Write JSON output to log file (even if command failed - that's where errors are!)
+        with open(log_file, 'w') as f:
+            f.write(result.stdout)
+    except FileNotFoundError:
+        print(f'Error: {config["command"]} not found', file=sys.stderr)
+        return 127
+    except Exception as e:
+        print(f'Error running {linter} for JSON capture: {e}', file=sys.stderr)
+
+    # Run normal command for display output and exit code
+    try:
+        result = subprocess.run(normal_cmd)
+        return result.returncode
+    except FileNotFoundError:
+        print(f'Error: {config["command"]} not found', file=sys.stderr)
+        return 127

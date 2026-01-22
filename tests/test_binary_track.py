@@ -43,9 +43,11 @@ from pre_commit.binary_track import (
     ensure_binary_executable,
     ensure_install_path_exists,
     expand_patterns,
+    generate_config_file,
     get_current_commit,
     get_current_platform,
     get_default_install_locations,
+    get_language_preset,
     get_path_setup_instructions,
     get_recommended_install_path,
     get_service_status,
@@ -53,13 +55,17 @@ from pre_commit.binary_track import (
     is_binary_stale,
     is_codesign_available,
     is_path_in_system_path,
+    list_language_presets,
     load_config_file,
     load_env_config,
     load_manifest,
+    load_pre_commit_config,
     save_manifest,
     start_service,
     stop_service,
     verify_signature,
+    _build_inline_config,
+    _parse_precommit_args_to_config,
 )
 
 if TYPE_CHECKING:
@@ -2304,3 +2310,469 @@ class TestBuildFailureReasonServiceErrors:
     def test_service_start_failed_reason(self) -> None:
         """Test SERVICE_START_FAILED reason exists."""
         assert BuildFailureReason.SERVICE_START_FAILED.value == "service_start_failed"
+
+
+# =============================================================================
+# Language Presets Tests
+# =============================================================================
+
+
+class TestLanguagePresets:
+    """Tests for language preset functionality."""
+
+    def test_get_language_preset_go(self) -> None:
+        """Test getting Go language preset."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("go")
+        assert preset is not None
+        assert preset.name == "go"
+        assert "**/*.go" in preset.source_patterns
+        assert "go build" in preset.default_build_cmd
+
+    def test_get_language_preset_rust(self) -> None:
+        """Test getting Rust language preset."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("rust")
+        assert preset is not None
+        assert preset.name == "rust"
+        assert "**/*.rs" in preset.source_patterns
+        assert "cargo" in preset.default_build_cmd
+
+    def test_get_language_preset_uv(self) -> None:
+        """Test getting uv (Python) language preset."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("uv")
+        assert preset is not None
+        assert preset.name == "uv"
+        assert "**/*.py" in preset.source_patterns
+        assert "uv.lock" in preset.source_patterns
+        assert "uv tool install --force" in preset.default_build_cmd
+
+    def test_get_language_preset_pnpm(self) -> None:
+        """Test getting pnpm (Node.js) language preset."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("pnpm")
+        assert preset is not None
+        assert preset.name == "pnpm"
+        assert "**/*.ts" in preset.source_patterns or "**/*.js" in preset.source_patterns
+        assert "pnpm-lock.yaml" in preset.source_patterns
+        assert "pnpm" in preset.default_build_cmd
+
+    def test_get_language_preset_case_insensitive(self) -> None:
+        """Test that language names are case-insensitive."""
+        from pre_commit.binary_track import get_language_preset
+
+        assert get_language_preset("GO") is not None
+        assert get_language_preset("Go") is not None
+        assert get_language_preset("go") is not None
+
+    def test_get_language_preset_unknown(self) -> None:
+        """Test that unknown language returns None."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("unknown_language")
+        assert preset is None
+
+    def test_list_language_presets(self) -> None:
+        """Test listing all language presets."""
+        from pre_commit.binary_track import list_language_presets
+
+        presets = list_language_presets()
+        assert len(presets) > 5  # Should have at least 5 presets
+        names = [p[0] for p in presets]
+        assert "go" in names
+        assert "rust" in names
+        assert "python" in names
+
+    def test_language_preset_get_build_cmd(self) -> None:
+        """Test that build cmd templates are filled correctly."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("go")
+        assert preset is not None
+
+        build_cmd = preset.get_build_cmd("mytool")
+        assert "mytool" in build_cmd
+        assert "{name}" not in build_cmd  # Template should be replaced
+
+    def test_language_preset_get_install_path(self) -> None:
+        """Test that install path templates are filled correctly."""
+        from pre_commit.binary_track import get_language_preset
+
+        preset = get_language_preset("go")
+        assert preset is not None
+
+        install_path = preset.get_install_path("mytool")
+        assert "mytool" in install_path
+        assert "{name}" not in install_path
+
+    def test_all_presets_have_required_fields(self) -> None:
+        """Test that all presets have required fields."""
+        from pre_commit.binary_track import LANGUAGE_PRESETS
+
+        for name, preset in LANGUAGE_PRESETS.items():
+            assert preset.name == name
+            assert len(preset.source_patterns) > 0
+            assert preset.default_build_cmd
+            assert preset.default_install_path_template
+            assert len(preset.file_extensions) > 0
+            assert preset.description
+
+
+class TestDetectLanguageFromPatterns:
+    """Tests for language detection from patterns."""
+
+    def test_detect_go(self) -> None:
+        """Test detecting Go from patterns."""
+        from pre_commit.binary_track import detect_language_from_patterns
+
+        lang = detect_language_from_patterns(["**/*.go", "go.mod"])
+        assert lang == "go"
+
+    def test_detect_rust(self) -> None:
+        """Test detecting Rust from patterns."""
+        from pre_commit.binary_track import detect_language_from_patterns
+
+        lang = detect_language_from_patterns(["src/**/*.rs"])
+        assert lang == "rust"
+
+    def test_detect_unknown(self) -> None:
+        """Test detecting unknown language."""
+        from pre_commit.binary_track import detect_language_from_patterns
+
+        lang = detect_language_from_patterns(["**/*.xyz"])
+        assert lang is None
+
+
+# =============================================================================
+# Pre-commit Config Loading Tests
+# =============================================================================
+
+
+class TestLoadPreCommitConfig:
+    """Tests for loading config from .pre-commit-config.yaml."""
+
+    def test_load_no_config_file(self, tmp_path: Path) -> None:
+        """Test loading when no config file exists."""
+        from pre_commit.binary_track import load_pre_commit_config
+
+        config = load_pre_commit_config(tmp_path)
+        assert config == {}
+
+    def test_load_no_binary_track_hook(self, tmp_path: Path) -> None:
+        """Test loading when no binary-track hook is defined."""
+        from pre_commit.binary_track import load_pre_commit_config
+
+        config_path = tmp_path / ".pre-commit-config.yaml"
+        config_path.write_text("""
+repos:
+  - repo: local
+    hooks:
+      - id: some-other-hook
+        name: Other Hook
+        entry: other-hook
+        language: system
+""")
+        config = load_pre_commit_config(tmp_path)
+        assert config == {}
+
+    def test_load_binary_track_hook_with_policy(self, tmp_path: Path) -> None:
+        """Test loading binary-track hook with policy arg."""
+        from pre_commit.binary_track import load_pre_commit_config
+
+        config_path = tmp_path / ".pre-commit-config.yaml"
+        config_path.write_text("""
+repos:
+  - repo: local
+    hooks:
+      - id: binary-track
+        name: Binary Track
+        entry: binary-track
+        language: python
+        args:
+          - --policy=block
+          - --track-by=mtime
+""")
+        config = load_pre_commit_config(tmp_path)
+        assert config.get("pre_commit_policy") == "block"
+        assert config.get("track_by") == "mtime"
+
+    def test_load_binary_track_hook_with_binary(self, tmp_path: Path) -> None:
+        """Test loading binary-track hook with inline binary definition."""
+        from pre_commit.binary_track import load_pre_commit_config
+
+        config_path = tmp_path / ".pre-commit-config.yaml"
+        config_path.write_text("""
+repos:
+  - repo: local
+    hooks:
+      - id: binary-track
+        name: Binary Track
+        entry: binary-track
+        language: python
+        args:
+          - --binary=mytool
+          - --language=go
+""")
+        config = load_pre_commit_config(tmp_path)
+        assert "binaries" in config
+        assert "mytool" in config["binaries"]
+        assert config["binaries"]["mytool"]["language"] == "go"
+
+
+class TestParsePrecommitArgsToConfig:
+    """Tests for parsing pre-commit args to config."""
+
+    def test_parse_global_options(self) -> None:
+        """Test parsing global config options."""
+        from pre_commit.binary_track import _parse_precommit_args_to_config
+
+        args = ["--policy=warn", "--track-by=hash"]
+        config = _parse_precommit_args_to_config(args)
+
+        assert config["pre_commit_policy"] == "warn"
+        assert config["track_by"] == "hash"
+
+    def test_parse_single_binary(self) -> None:
+        """Test parsing a single binary definition."""
+        from pre_commit.binary_track import _parse_precommit_args_to_config
+
+        args = [
+            "--binary=mytool",
+            "--language=go",
+            "--install-path=~/.local/bin/mytool",
+        ]
+        config = _parse_precommit_args_to_config(args)
+
+        assert "mytool" in config["binaries"]
+        binary = config["binaries"]["mytool"]
+        assert binary["language"] == "go"
+        assert binary["install_path"] == "~/.local/bin/mytool"
+        # Language preset should fill in defaults
+        assert "source_patterns" in binary
+        assert "build_cmd" in binary
+
+    def test_parse_multiple_binaries(self) -> None:
+        """Test parsing multiple binary definitions."""
+        from pre_commit.binary_track import _parse_precommit_args_to_config
+
+        args = [
+            "--binary=tool1",
+            "--language=go",
+            "--binary=tool2",
+            "--language=rust",
+        ]
+        config = _parse_precommit_args_to_config(args)
+
+        assert len(config["binaries"]) == 2
+        assert "tool1" in config["binaries"]
+        assert "tool2" in config["binaries"]
+        assert config["binaries"]["tool1"]["language"] == "go"
+        assert config["binaries"]["tool2"]["language"] == "rust"
+
+    def test_parse_binary_with_custom_patterns(self) -> None:
+        """Test parsing binary with custom source patterns."""
+        from pre_commit.binary_track import _parse_precommit_args_to_config
+
+        args = [
+            "--binary=mytool",
+            "--source-patterns=src/**/*.go,pkg/**/*.go",
+            "--build-cmd=make build",
+        ]
+        config = _parse_precommit_args_to_config(args)
+
+        binary = config["binaries"]["mytool"]
+        assert binary["source_patterns"] == ["src/**/*.go", "pkg/**/*.go"]
+        assert binary["build_cmd"] == "make build"
+
+
+# =============================================================================
+# Inline Config Building Tests
+# =============================================================================
+
+
+class TestBuildInlineConfig:
+    """Tests for building config from inline CLI arguments."""
+
+    def test_build_empty_config(self) -> None:
+        """Test building config with no binaries."""
+        from argparse import Namespace
+
+        from pre_commit.binary_track import _build_inline_config
+
+        args = Namespace(
+            binaries=None,
+            languages=None,
+            source_patterns_list=None,
+            build_cmds=None,
+            install_paths=None,
+            test_cmds=None,
+            policy=None,
+            track_by=None,
+        )
+        config = _build_inline_config(args)
+        assert config == {"binaries": {}}
+
+    def test_build_single_binary_with_language(self) -> None:
+        """Test building config with a single binary using language preset."""
+        from argparse import Namespace
+
+        from pre_commit.binary_track import _build_inline_config
+
+        args = Namespace(
+            binaries=["mytool"],
+            languages=["go"],
+            source_patterns_list=None,
+            build_cmds=None,
+            install_paths=None,
+            test_cmds=None,
+            policy=None,
+            track_by=None,
+        )
+        config = _build_inline_config(args)
+
+        assert "mytool" in config["binaries"]
+        binary = config["binaries"]["mytool"]
+        assert binary["language"] == "go"
+        assert "source_patterns" in binary
+        assert "build_cmd" in binary
+        assert "install_path" in binary
+
+    def test_build_multiple_binaries(self) -> None:
+        """Test building config with multiple binaries."""
+        from argparse import Namespace
+
+        from pre_commit.binary_track import _build_inline_config
+
+        args = Namespace(
+            binaries=["tool1", "tool2"],
+            languages=["go", "rust"],
+            source_patterns_list=None,
+            build_cmds=None,
+            install_paths=None,
+            test_cmds=None,
+            policy=None,
+            track_by=None,
+        )
+        config = _build_inline_config(args)
+
+        assert len(config["binaries"]) == 2
+        assert config["binaries"]["tool1"]["language"] == "go"
+        assert config["binaries"]["tool2"]["language"] == "rust"
+
+    def test_build_with_explicit_overrides(self) -> None:
+        """Test that explicit values override language presets."""
+        from argparse import Namespace
+
+        from pre_commit.binary_track import _build_inline_config
+
+        args = Namespace(
+            binaries=["mytool"],
+            languages=["go"],
+            source_patterns_list=["custom/**/*.go"],
+            build_cmds=["make custom-build"],
+            install_paths=["/custom/path/mytool"],
+            test_cmds=["mytool --version"],
+            policy="block",
+            track_by="hash",
+        )
+        config = _build_inline_config(args)
+
+        binary = config["binaries"]["mytool"]
+        assert binary["source_patterns"] == ["custom/**/*.go"]
+        assert binary["build_cmd"] == "make custom-build"
+        assert binary["install_path"] == "/custom/path/mytool"
+        assert binary["test_cmd"] == "mytool --version"
+        assert config["pre_commit_policy"] == "block"
+        assert config["track_by"] == "hash"
+
+
+# =============================================================================
+# Config Generation Tests
+# =============================================================================
+
+
+class TestGenerateConfigFile:
+    """Tests for generating config files."""
+
+    def test_generate_basic_config(self, tmp_path: Path) -> None:
+        """Test generating a basic config file."""
+        from pre_commit.binary_track import generate_config_file
+
+        config = TrackConfig(
+            track_by=TrackingMethod.GIT_COMMIT,
+            pre_commit_policy=PreCommitPolicy.WARN,
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    language="go",
+                    source_patterns=["**/*.go"],
+                    build_cmd="go build",
+                    install_path="~/.local/bin/mytool",
+                ),
+            },
+        )
+        output_path = tmp_path / ".binariesrc.yaml"
+        content = generate_config_file(config, output_path)
+
+        assert output_path.exists()
+        assert "mytool" in content
+        assert "language: go" in content
+        assert "track_by: git_commit" in content
+        assert "pre_commit_policy: warn" in content
+
+    def test_generate_config_with_codesign(self, tmp_path: Path) -> None:
+        """Test generating config with codesign settings."""
+        from pre_commit.binary_track import generate_config_file
+
+        config = TrackConfig(
+            track_by=TrackingMethod.GIT_COMMIT,
+            pre_commit_policy=PreCommitPolicy.WARN,
+            codesign=CodesignConfig(
+                enabled=True,
+                identity="Developer ID",
+            ),
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    source_patterns=["**/*.go"],
+                    build_cmd="go build",
+                    install_path="~/.local/bin/mytool",
+                ),
+            },
+        )
+        output_path = tmp_path / ".binariesrc.yaml"
+        content = generate_config_file(config, output_path)
+
+        assert "codesign:" in content
+        assert "enabled: true" in content
+        assert "Developer ID" in content
+
+    def test_generated_config_is_valid_yaml(self, tmp_path: Path) -> None:
+        """Test that generated config is valid YAML."""
+        from pre_commit.binary_track import generate_config_file
+
+        config = TrackConfig(
+            binaries={
+                "mytool": BinaryConfig(
+                    name="mytool",
+                    language="rust",
+                    source_patterns=["**/*.rs"],
+                    build_cmd="cargo build",
+                    install_path="~/.local/bin/mytool",
+                ),
+            },
+        )
+        output_path = tmp_path / ".binariesrc.yaml"
+        generate_config_file(config, output_path)
+
+        # Should be parseable as YAML
+        with open(output_path) as f:
+            parsed = yaml.safe_load(f)
+
+        assert "binaries" in parsed
+        assert "mytool" in parsed["binaries"]

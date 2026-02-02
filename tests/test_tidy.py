@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import json
 import os
-import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 
 from pre_commit.tidy import collect_files
 from pre_commit.tidy import CollisionKeep

@@ -172,7 +172,7 @@ except ImportError:
     def send2trash(path: str | Path) -> None:  # type: ignore[misc]
         """Fallback when send2trash is not installed."""
         raise RuntimeError(
-            "send2trash is not installed. Install with: pip install send2trash"
+            'send2trash is not installed. Install with: pip install send2trash',
         )
 
 # Version
@@ -813,7 +813,7 @@ def detect_project_type(root_dir: Path, warn_on_low_confidence: bool = True) -> 
                     file=sys.stderr,
                 )
         print(
-            "         Use --preset to specify explicitly, or add more marker files.",
+            '         Use --preset to specify explicitly, or add more marker files.',
             file=sys.stderr,
         )
 
@@ -1777,13 +1777,13 @@ def trash_file(
         if delete_mode == DeleteMode.TRASH:
             if not TRASH_AVAILABLE:
                 return False, (
-                    "send2trash not installed. "
-                    "Install with: pip install send2trash"
+                    'send2trash not installed. '
+                    'Install with: pip install send2trash'
                 )
             send2trash(str(file_path))
             if logger:
                 logger.verbose(f"Moved to trash: {file_path}")
-            return True, ""
+            return True, ''
         else:
             # Permanent delete
             if file_path.is_dir():
@@ -1792,7 +1792,7 @@ def trash_file(
                 file_path.unlink()
             if logger:
                 logger.verbose(f"Permanently deleted: {file_path}")
-            return True, ""
+            return True, ''
     except Exception as e:
         return False, str(e)
 
@@ -2587,7 +2587,7 @@ def analyze_repository(
 
     logger.info(
         f"Detected project type: {Colors.CYAN}{project_type}{Colors.RESET} "
-        f"(confidence: {confidence_color}{detection.confidence.value}{Colors.RESET})"
+        f"(confidence: {confidence_color}{detection.confidence.value}{Colors.RESET})",
     )
 
     if detection.markers_found:
@@ -2595,7 +2595,7 @@ def analyze_repository(
 
     if detection.confidence == DetectionConfidence.LOW:
         logger.warn(
-            "Low confidence detection. Consider using --preset to specify project type."
+            'Low confidence detection. Consider using --preset to specify project type.',
         )
 
     # Collect files to analyze
@@ -2617,7 +2617,7 @@ def analyze_repository(
             misplaced.append((
                 file,
                 'archive_file',
-                "Move to archive/ directory or delete",
+                'Move to archive/ directory or delete',
             ))
             continue
 
@@ -2629,7 +2629,7 @@ def analyze_repository(
                     misplaced.append((
                         file,
                         'root_file_not_in_root',
-                        "This file typically belongs in the project root",
+                        'This file typically belongs in the project root',
                     ))
             except ValueError:
                 pass  # File is not relative to root_dir
@@ -2664,12 +2664,12 @@ def analyze_repository(
                 misplaced.append((
                     file,
                     'docs_in_source',
-                    "Consider moving to docs/ directory",
+                    'Consider moving to docs/ directory',
                 ))
 
     # Find orphan files if enabled
     if config.detect_orphans:
-        logger.info("Scanning for orphaned files...")
+        logger.info('Scanning for orphaned files...')
         # Extract just the paths from the file_tuples
         file_paths = [f for f, _ in file_tuples]
         orphans = find_orphan_files(file_paths, root_dir)
@@ -2678,7 +2678,7 @@ def analyze_repository(
                 misplaced.append((
                     orphan,
                     'orphan_file',
-                    "File not referenced in codebase - consider archiving or deleting",  # noqa: E501
+                    'File not referenced in codebase - consider archiving or deleting',  # noqa: E501
                 ))
 
     # Generate suggested rules based on analysis
@@ -2762,7 +2762,7 @@ def print_analysis_report(result: AnalysisResult, logger: Logger) -> None:
             logger.info(f"    Issue: {issue_display}")
             logger.info(f"    Suggestion: {suggestion}")
     else:
-        logger.success("\nNo issues found! Repository structure looks good.")
+        logger.success('\nNo issues found! Repository structure looks good.')
 
     if result.archive_files:
         logger.info(f"\n{Colors.YELLOW}Archive/Backup Files ({len(result.archive_files)}):{Colors.RESET}")  # noqa: E501
@@ -2800,12 +2800,12 @@ def interactive_move(
     print(f"\n{Colors.BOLD}File:{Colors.RESET} {file}")
     print(f"{Colors.CYAN}Suggested target:{Colors.RESET} {suggested_target}")
     print()
-    print("Options:")
-    print("  [m] Move to suggested target")
-    print("  [s] Skip this file")
-    print("  [c] Enter custom target")
-    print("  [a] Move all remaining (non-interactive)")
-    print("  [q] Quit")
+    print('Options:')
+    print('  [m] Move to suggested target')
+    print('  [s] Skip this file')
+    print('  [c] Enter custom target')
+    print('  [a] Move all remaining (non-interactive)')
+    print('  [q] Quit')
     print()
 
     while True:
@@ -2825,7 +2825,7 @@ def interactive_move(
         elif choice in ['q', 'quit']:
             return 'quit'
         else:
-            print("Invalid choice. Please enter m, s, c, a, or q.")
+            print('Invalid choice. Please enter m, s, c, a, or q.')
 
 
 def get_custom_target(config: TidyConfig) -> Path | None:
@@ -3009,9 +3009,11 @@ Rule-based Routing (in config file):
     # Smart architecture features
     parser.add_argument(
         '--preset',
-        choices=['python', 'node', 'go', 'rust', 'java', 'ruby', 'php', 'dotnet',
-                 'swift', 'kotlin', 'scala', 'elixir', 'haskell', 'c_cpp',
-                 'terraform', 'docker', 'monorepo', 'generic'],
+        choices=[
+            'python', 'node', 'go', 'rust', 'java', 'ruby', 'php', 'dotnet',
+            'swift', 'kotlin', 'scala', 'elixir', 'haskell', 'c_cpp',
+            'terraform', 'docker', 'monorepo', 'generic',
+        ],
         help='Use preset rules for project type (auto-detects if not specified)',
     )
     parser.add_argument(
@@ -3157,7 +3159,7 @@ def main(argv: list[str] | None = None) -> int:
         if not files_to_trash:
             # If no files specified, show help
             print(f"{Colors.YELLOW}Usage:{Colors.RESET} tidy --trash FILE [FILE ...]")
-            print("Move files to system trash (recoverable)")
+            print('Move files to system trash (recoverable)')
             return 0
 
         trashed = 0
@@ -3174,7 +3176,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 success, error = trash_file(path, config.delete_mode, logger)
                 if success:
-                    status = "trashed" if config.delete_mode == DeleteMode.TRASH else "deleted"  # noqa: E501
+                    status = 'trashed' if config.delete_mode == DeleteMode.TRASH else 'deleted'  # noqa: E501
                     logger.success(f"{status.capitalize()}: {file_path}")
                     trashed += 1
                 else:
@@ -3192,7 +3194,7 @@ def main(argv: list[str] | None = None) -> int:
             DetectionConfidence.MEDIUM: f"{Colors.CYAN}◐ MEDIUM{Colors.RESET}",
             DetectionConfidence.LOW: f"{Colors.YELLOW}⚠ LOW{Colors.RESET}",
             DetectionConfidence.NONE: f"{Colors.GRAY}✗ NONE{Colors.RESET}",
-        }.get(detection.confidence, "UNKNOWN")
+        }.get(detection.confidence, 'UNKNOWN')
 
         print(f"\n{Colors.BOLD}Project Type Detection{Colors.RESET}")
         print(f"{'=' * 40}")
@@ -3207,15 +3209,15 @@ def main(argv: list[str] | None = None) -> int:
                     DetectionConfidence.HIGH: f"{Colors.GREEN}HIGH{Colors.RESET}",
                     DetectionConfidence.MEDIUM: f"{Colors.CYAN}MEDIUM{Colors.RESET}",
                     DetectionConfidence.LOW: f"{Colors.YELLOW}LOW{Colors.RESET}",
-                }.get(conf, "?")
+                }.get(conf, '?')
                 print(f"  • {ptype:12} ({conf_label:20}) - {', '.join(markers[:3])}")
 
         print(f"\n{Colors.BOLD}Available Presets:{Colors.RESET}")
         presets_list = sorted(PRESETS.keys())
         for i in range(0, len(presets_list), 6):
-            print(f"  {', '.join(presets_list[i:i+6])}")
+            print(f"  {', '.join(presets_list[i:i + 6])}")
 
-        print("\nUse --preset <type> to override auto-detection.\n")
+        print('\nUse --preset <type> to override auto-detection.\n')
         return 0
 
     # Apply smart architecture CLI overrides

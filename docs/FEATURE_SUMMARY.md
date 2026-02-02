@@ -256,7 +256,7 @@ Found 3 error(s)
 error ruff:E501 src/main.py:42:89
   Line too long (120 > 88 characters)
   → Fix suggested by GitHub Copilot
-  
+
 --- src/main.py
 @@ -40,3 +40,4 @@
 -    result = some_very_long_function_call(argument1, argument2, argument3, argument4)
@@ -547,6 +547,6 @@ Complete documentation available in:
 
 The multi-remote sync feature is **production-ready** and provides significant value to developers managing multiple git remotes. The VPN support makes it especially useful for teams with private infrastructure.
 
-**Installation**: `pip install -e .`  
-**Usage**: `remote-sync --help`  
+**Installation**: `pip install -e .`
+**Usage**: `remote-sync --help`
 **Repository**: https://github.com/codefuturist/pre-commit

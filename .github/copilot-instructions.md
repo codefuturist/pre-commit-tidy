@@ -106,5 +106,3 @@ logger.error("Failed")                 # ✗ red
 - Tests auto-change to `tmp_path` - create test files/configs there
 - Use `monkeypatch.setenv()` for environment variable tests
 - Mock git commands when testing `binary_track` or `remote_sync`
-- Check `tests/test_tidy.py` for comprehensive examples of testing config loading and file operations
----

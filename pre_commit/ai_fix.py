@@ -613,7 +613,7 @@ class Logger:
         else:
             self._print(f'\n{Colors.BOLD}{message}{Colors.RESET}')
 
-    def lint_error(self, error: 'LintError') -> None:
+    def lint_error(self, error: LintError) -> None:
         """Print a lint error in a formatted way."""
         if self.json_output:
             self._json_buffer.append({
@@ -1103,19 +1103,21 @@ class RuffParser(LinterParser):
                 if item.get('fix') is not None:
                     severity = Severity.WARNING  # Fixable issues are warnings
 
-                errors.append(LintError(
-                    linter='ruff',
-                    file=item.get('filename', ''),
-                    line=item.get('location', {}).get('row', 0),
-                    column=item.get('location', {}).get('column'),
-                    code=item.get('code', ''),
-                    message=item.get('message', ''),
-                    severity=severity,
-                    category=self._categorize(item.get('code', '')),
-                    suggestion=item.get('fix', {}).get('message') if item.get('fix') else None,
-                    fix_hint=item.get('fix', {}).get('edits') if item.get('fix') else None,
-                    raw_output=item,
-                ))
+                errors.append(
+                    LintError(
+                        linter='ruff',
+                        file=item.get('filename', ''),
+                        line=item.get('location', {}).get('row', 0),
+                        column=item.get('location', {}).get('column'),
+                        code=item.get('code', ''),
+                        message=item.get('message', ''),
+                        severity=severity,
+                        category=self._categorize(item.get('code', '')),
+                        suggestion=item.get('fix', {}).get('message') if item.get('fix') else None,
+                        fix_hint=item.get('fix', {}).get('edits') if item.get('fix') else None,
+                        raw_output=item,
+                    ),
+                )
         except json.JSONDecodeError:
             logger.debug(f'Failed to parse Ruff JSON output: {output[:200]}')
 
@@ -1157,17 +1159,19 @@ class MypyParser(LinterParser):
                 if not line.strip():
                     continue
                 data = json.loads(line)
-                errors.append(LintError(
-                    linter='mypy',
-                    file=data.get('file', ''),
-                    line=data.get('line', 0),
-                    column=data.get('column'),
-                    code=data.get('code', 'error'),
-                    message=data.get('message', ''),
-                    severity=self._parse_severity(data.get('severity', 'error')),
-                    category='type',
-                    raw_output=data,
-                ))
+                errors.append(
+                    LintError(
+                        linter='mypy',
+                        file=data.get('file', ''),
+                        line=data.get('line', 0),
+                        column=data.get('column'),
+                        code=data.get('code', 'error'),
+                        message=data.get('message', ''),
+                        severity=self._parse_severity(data.get('severity', 'error')),
+                        category='type',
+                        raw_output=data,
+                    ),
+                )
             return errors
         except json.JSONDecodeError:
             pass
@@ -1181,16 +1185,18 @@ class MypyParser(LinterParser):
         for line in output.strip().split('\n'):
             match = pattern.match(line.strip())
             if match:
-                errors.append(LintError(
-                    linter='mypy',
-                    file=match.group('file'),
-                    line=int(match.group('line')),
-                    column=int(match.group('col')) if match.group('col') else None,
-                    code=match.group('code') or 'error',
-                    message=match.group('message'),
-                    severity=self._parse_severity(match.group('severity')),
-                    category='type',
-                ))
+                errors.append(
+                    LintError(
+                        linter='mypy',
+                        file=match.group('file'),
+                        line=int(match.group('line')),
+                        column=int(match.group('col')) if match.group('col') else None,
+                        code=match.group('code') or 'error',
+                        message=match.group('message'),
+                        severity=self._parse_severity(match.group('severity')),
+                        category='type',
+                    ),
+                )
 
         return errors
 
@@ -1227,18 +1233,20 @@ class ESLintParser(LinterParser):
             for file_result in data:
                 filepath = file_result.get('filePath', '')
                 for msg in file_result.get('messages', []):
-                    errors.append(LintError(
-                        linter='eslint',
-                        file=filepath,
-                        line=msg.get('line', 0),
-                        column=msg.get('column'),
-                        code=msg.get('ruleId', 'parse-error') or 'parse-error',
-                        message=msg.get('message', ''),
-                        severity=Severity.ERROR if msg.get('severity') == 2 else Severity.WARNING,
-                        category=self._categorize(msg.get('ruleId', '')),
-                        suggestion=msg.get('suggestions', [{}])[0].get('desc') if msg.get('suggestions') else None,
-                        raw_output=msg,
-                    ))
+                    errors.append(
+                        LintError(
+                            linter='eslint',
+                            file=filepath,
+                            line=msg.get('line', 0),
+                            column=msg.get('column'),
+                            code=msg.get('ruleId', 'parse-error') or 'parse-error',
+                            message=msg.get('message', ''),
+                            severity=Severity.ERROR if msg.get('severity') == 2 else Severity.WARNING,
+                            category=self._categorize(msg.get('ruleId', '')),
+                            suggestion=msg.get('suggestions', [{}])[0].get('desc') if msg.get('suggestions') else None,
+                            raw_output=msg,
+                        ),
+                    )
         except json.JSONDecodeError:
             logger.debug(f'Failed to parse ESLint JSON output: {output[:200]}')
 
@@ -1283,17 +1291,19 @@ class PylintParser(LinterParser):
         try:
             data = json.loads(output)
             for item in data:
-                errors.append(LintError(
-                    linter='pylint',
-                    file=item.get('path', ''),
-                    line=item.get('line', 0),
-                    column=item.get('column'),
-                    code=item.get('message-id', ''),
-                    message=item.get('message', ''),
-                    severity=self._parse_severity(item.get('type', 'error')),
-                    category=self._categorize(item.get('type', '')),
-                    raw_output=item,
-                ))
+                errors.append(
+                    LintError(
+                        linter='pylint',
+                        file=item.get('path', ''),
+                        line=item.get('line', 0),
+                        column=item.get('column'),
+                        code=item.get('message-id', ''),
+                        message=item.get('message', ''),
+                        severity=self._parse_severity(item.get('type', 'error')),
+                        category=self._categorize(item.get('type', '')),
+                        raw_output=item,
+                    ),
+                )
         except json.JSONDecodeError:
             logger.debug(f'Failed to parse Pylint JSON output: {output[:200]}')
 
@@ -1346,16 +1356,18 @@ class TypeScriptParser(LinterParser):
         for line in output.strip().split('\n'):
             match = pattern.match(line.strip())
             if match:
-                errors.append(LintError(
-                    linter='tsc',
-                    file=match.group('file'),
-                    line=int(match.group('line')),
-                    column=int(match.group('col')),
-                    code=match.group('code'),
-                    message=match.group('message'),
-                    severity=Severity.ERROR if match.group('severity') == 'error' else Severity.WARNING,
-                    category='type',
-                ))
+                errors.append(
+                    LintError(
+                        linter='tsc',
+                        file=match.group('file'),
+                        line=int(match.group('line')),
+                        column=int(match.group('col')),
+                        code=match.group('code'),
+                        message=match.group('message'),
+                        severity=Severity.ERROR if match.group('severity') == 'error' else Severity.WARNING,
+                        category='type',
+                    ),
+                )
 
         return errors
 
@@ -1771,7 +1783,7 @@ class VibeProvider(AIProviderBase):
     def is_available(self) -> bool:
         """Check if Vibe CLI is available at configured path."""
         return is_binary_available('vibe') and bool(
-            os.environ.get('MISTRAL_API_KEY')
+            os.environ.get('MISTRAL_API_KEY'),
         )
 
     def generate_fix(
@@ -2162,12 +2174,14 @@ class FixCache:
 
         try:
             with open(cache_file, 'w') as f:
-                json.dump({
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'linter': error.linter,
-                    'code': error.code,
-                    'fixed_content': fixed_content,
-                }, f)
+                json.dump(
+                    {
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'linter': error.linter,
+                        'code': error.code,
+                        'fixed_content': fixed_content,
+                    }, f,
+                )
         except Exception:
             pass
 
@@ -2603,11 +2617,13 @@ class AIFixRunner:
 
         # Prompt mode
         import difflib
-        diff = '\n'.join(difflib.unified_diff(
-            context.splitlines(),
-            fixed_content.splitlines(),
-            lineterm='',
-        ))
+        diff = '\n'.join(
+            difflib.unified_diff(
+                context.splitlines(),
+                fixed_content.splitlines(),
+                lineterm='',
+            ),
+        )
 
         action = prompt_user(error, diff)
 

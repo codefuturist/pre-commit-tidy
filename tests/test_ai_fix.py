@@ -9,34 +9,32 @@ from unittest import mock
 
 import pytest
 
-from pre_commit.ai_fix import (
-    AIFixConfig,
-    AIFixConfigDict,
-    AIFixRunner,
-    BehaviorConfig,
-    CacheConfig,
-    Colors,
-    ErrorComplexity,
-    ESLintParser,
-    FixResult,
-    FixStrategy,
-    IterationProgress,
-    LintError,
-    LinterRuntimeConfig,
-    Logger,
-    MypyParser,
-    ProviderConfig,
-    RuffParser,
-    Severity,
-    TypeScriptParser,
-    dedupe_errors,
-    detect_linters,
-    get_file_context,
-    get_fix_strategy,
-    load_config_file,
-    load_env_config,
-    sort_errors,
-)
+from pre_commit.ai_fix import AIFixConfig
+from pre_commit.ai_fix import AIFixConfigDict
+from pre_commit.ai_fix import AIFixRunner
+from pre_commit.ai_fix import BehaviorConfig
+from pre_commit.ai_fix import CacheConfig
+from pre_commit.ai_fix import Colors
+from pre_commit.ai_fix import dedupe_errors
+from pre_commit.ai_fix import detect_linters
+from pre_commit.ai_fix import ErrorComplexity
+from pre_commit.ai_fix import ESLintParser
+from pre_commit.ai_fix import FixResult
+from pre_commit.ai_fix import FixStrategy
+from pre_commit.ai_fix import get_file_context
+from pre_commit.ai_fix import get_fix_strategy
+from pre_commit.ai_fix import IterationProgress
+from pre_commit.ai_fix import LintError
+from pre_commit.ai_fix import LinterRuntimeConfig
+from pre_commit.ai_fix import load_config_file
+from pre_commit.ai_fix import load_env_config
+from pre_commit.ai_fix import Logger
+from pre_commit.ai_fix import MypyParser
+from pre_commit.ai_fix import ProviderConfig
+from pre_commit.ai_fix import RuffParser
+from pre_commit.ai_fix import Severity
+from pre_commit.ai_fix import sort_errors
+from pre_commit.ai_fix import TypeScriptParser
 
 
 # =============================================================================
@@ -336,12 +334,14 @@ behavior:
     def test_load_json_config(self, tmp_path: Path) -> None:
         """Test loading JSON config."""
         config_file = tmp_path / '.aifixrc.json'
-        config_file.write_text(json.dumps({
-            'ai_provider': 'ollama',
-            'providers': {
-                'ollama': {'model': 'codellama'},
-            },
-        }))
+        config_file.write_text(
+            json.dumps({
+                'ai_provider': 'ollama',
+                'providers': {
+                    'ollama': {'model': 'codellama'},
+                },
+            }),
+        )
 
         config = load_config_file(config_file)
 
@@ -661,12 +661,14 @@ class TestAIFixRunner:
 
         with mock.patch('pre_commit.ai_fix.get_staged_files', return_value=['test.py']):
             with mock.patch('pre_commit.ai_fix.detect_linters', return_value=['ruff']):
-                with mock.patch('pre_commit.ai_fix.run_linter', return_value=[
-                    LintError(
-                        linter='ruff', file='test.py', line=1, column=None,
-                        code='E501', message='Test', severity=Severity.WARNING,
-                    ),
-                ]):
+                with mock.patch(
+                    'pre_commit.ai_fix.run_linter', return_value=[
+                        LintError(
+                            linter='ruff', file='test.py', line=1, column=None,
+                            code='E501', message='Test', severity=Severity.WARNING,
+                        ),
+                    ],
+                ):
                     result = runner.run()
 
         # Should fail because no provider
@@ -678,12 +680,18 @@ class TestAIFixRunner:
         runner = AIFixRunner(config, check_only=True)
 
         errors = [
-            LintError(linter='ruff', file='t.py', line=1, column=None,
-                      code='F401', message='Unused import', severity=Severity.WARNING),
-            LintError(linter='ruff', file='t.py', line=2, column=None,
-                      code='S101', message='Security', severity=Severity.ERROR),
-            LintError(linter='mypy', file='t.py', line=3, column=None,
-                      code='arg-type', message='Type error', severity=Severity.ERROR),
+            LintError(
+                linter='ruff', file='t.py', line=1, column=None,
+                code='F401', message='Unused import', severity=Severity.WARNING,
+            ),
+            LintError(
+                linter='ruff', file='t.py', line=2, column=None,
+                code='S101', message='Security', severity=Severity.ERROR,
+            ),
+            LintError(
+                linter='mypy', file='t.py', line=3, column=None,
+                code='arg-type', message='Type error', severity=Severity.ERROR,
+            ),
         ]
 
         groups = runner._group_by_complexity(errors)
@@ -702,8 +710,10 @@ class TestAIFixRunner:
 
         # Create 5 simple errors
         errors = [
-            LintError(linter='ruff', file='t.py', line=i, column=None,
-                      code='F401', message='Unused import', severity=Severity.WARNING)
+            LintError(
+                linter='ruff', file='t.py', line=i, column=None,
+                code='F401', message='Unused import', severity=Severity.WARNING,
+            )
             for i in range(5)
         ]
 
